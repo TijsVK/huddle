@@ -74,6 +74,9 @@
                 @if (!isRunning(c)) {
                   <button class="btn btn--accent btn-sm" (click)="resumeContainer(c.name)">Start</button>
                 }
+                @if (isRunning(c) && c.ide === 'vscode') {
+                  <button class="btn btn-ghost btn-sm" (click)="openIde(c.name)">VS Code</button>
+                }
                 <button class="btn btn-delete btn-sm" (click)="openSnapshot(c)">Snapshot</button>
                 <button class="btn btn-delete btn-sm" (click)="deleteContainer(c.name)">Delete</button>
               </td>

@@ -17,6 +17,7 @@ export interface Container {
   securityScore?: number;
   labels?: Record<string, string>;
   Labels?: Record<string, string>;
+  ide?: 'rider' | 'intellij' | 'vscode';
   airlocked?: boolean;
 }
 

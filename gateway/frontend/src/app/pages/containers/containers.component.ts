@@ -47,6 +47,12 @@ export class ContainersComponent {
     return rules.filter(r => r.container_id === name && r.status === 'requested').length;
   }
   openSnapshot(c: Container) { this.modal.openSnapshot(c.name); }
+  openIde(name: string): void {
+    this.api.getIdeLink(name).subscribe({
+      next: ({ link }) => window.open(link, '_self'),
+      error: (err) => alert(err.message),
+    });
+  }
   resumeContainer(name: string): void {
     this.api.resumeContainer(name).subscribe(() => this.state.loadAll());
   }

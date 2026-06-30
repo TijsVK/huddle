@@ -807,10 +807,16 @@ export async function createApiServer(): Promise<FastifyInstance> {
       const workspacePath: string | undefined = labels?.['com.intellij.devcontainer.workspace.path'];
       if (!workspacePath) return reply.code(404).send({ error: 'workspace path label not found' });
       const ide = labels?.['com.devcontainer.ide'];
-      // VS Code installeert zijn eigen backend bij het attachen en schrijft geen
-      // jetbrains-gateway://-link; een deep-link bestaat hier niet.
+      // VS Code schrijft geen jetbrains-gateway://-link, maar kent een eigen
+      // deep-link om aan een draaiende container te koppelen op een vast
+      // werkgebied: vscode://vscode-remote/attached-container+<hex><pad>, waarbij
+      // <hex> de hex-encoding van de containernaam is. Dit opent hetzelfde
+      // venster als "Dev Containers: Attach to Running Container".
       if (ide === 'vscode') {
-        return reply.code(404).send({ error: 'VS Code gebruikt geen JetBrains deep-link' });
+        const hex = Buffer.from(req.params.name, 'utf8').toString('hex');
+        // windowId=_blank dwingt een nieuw venster af; zonder deze query
+        // hergebruikt VS Code het laatst-actieve venster.
+        return { link: `vscode://vscode-remote/attached-container+${hex}${workspacePath}?windowId=_blank` };
       }
       // Rider en IntelliJ draaien beide remote-dev-server.sh, dat de gateway-link
       // naar <workspace>/rider-client-diagnose.log schrijft.

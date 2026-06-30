@@ -86,6 +86,7 @@ export interface DevcontainerInfo {
   status: string;
   workspacePath: string;
   presentableName: string;
+  ide?: IdeName;
   created: number;
   inNetwork: boolean;
   huddleInNetwork: boolean;
@@ -122,6 +123,7 @@ export async function listDevcontainers(): Promise<DevcontainerInfo[]> {
       status: c.Status,
       workspacePath: c.Labels?.['com.intellij.devcontainer.sources.path'] ?? '',
       presentableName: c.Labels?.['com.intellij.devcontainer.presentable.name'] ?? '',
+      ide: isIdeName(c.Labels?.['com.devcontainer.ide']) ? c.Labels['com.devcontainer.ide'] : undefined,
       created: c.Created,
       inNetwork: Boolean(dcNet?.IPAddress),
       huddleInNetwork: huddleNets.has(netName),
