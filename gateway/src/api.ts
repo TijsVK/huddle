@@ -662,11 +662,22 @@ export async function createApiServer(): Promise<FastifyInstance> {
 
   app.get('/api/authz/grants', async () => getAllGrants());
 
-  app.put<{ Params: { container: string }; Body: { minutes: number } }>(
+  // Een 'permanente' grant heeft geen echte vervaltijd. We modelleren dat als een
+  // `until` ver in de toekomst (jaar 9999) i.p.v. een aparte kolom/flag: zo blijven
+  // het grant-schema, de getGrant/setGrant-signatuur en de until-check ongewijzigd.
+  const PERMANENT_UNTIL = 253402300799; // 9999-12-31T23:59:59Z, in unix-seconden
+
+  app.put<{ Params: { container: string }; Body: { minutes?: number; permanent?: boolean } }>(
     '/api/authz/grants/:container',
     async (req, reply) => {
       const { container } = req.params;
-      const { minutes } = req.body;
+      const { minutes, permanent } = req.body;
+      if (permanent) {
+        setGrant(container, PERMANENT_UNTIL);
+        logAudit({ containerId: container, domain: 'docker-access', action: 'admin:grant-permanent' });
+        notifyStateChanged();
+        return { container, until: PERMANENT_UNTIL };
+      }
       if (!minutes || minutes < 1 || minutes > 120) {
         return reply.code(400).send({ error: 'minutes must be 1-120' });
       }

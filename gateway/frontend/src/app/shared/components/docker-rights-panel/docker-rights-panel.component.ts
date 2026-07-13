@@ -84,6 +84,11 @@ const ACTION_ICONS: Record<string, string> = {
 
 const DURATION_STORE_PREFIX = 'huddle.dockerActions.duration.';
 
+// Een grant met een `until` voorbij deze drempel is 'altijd aan' (permanent):
+// de backend zet zulke grants op jaar 9999. Elke realistische timer (max 120 min)
+// blijft ruim onder deze waarde.
+const PERMANENT_THRESHOLD = 4102444800; // 2100-01-01T00:00:00Z, in unix-seconden
+
 /**
  * Reusable panel with the fine-grained Docker permissions for one devcontainer:
  * timer hero + temporary actions + always-allowed actions + proxy explainer.
@@ -115,15 +120,21 @@ export class DockerRightsPanelComponent implements OnInit {
   durationSeconds = signal(0);
   private now = signal(Math.floor(Date.now() / 1000));
 
+  // Een permanente grant (altijd-aan) is afgeleid van een until ver in de toekomst.
+  grantPermanent = computed(() => (this.grantUntil() ?? 0) >= PERMANENT_THRESHOLD);
   remainingSeconds = computed(() => {
     const until = this.grantUntil();
     return until ? Math.max(0, until - this.now()) : 0;
   });
-  timerExpired = computed(() => this.remainingSeconds() <= 0);
+  // Een permanente grant is altijd actief, dus verloopt de timer nooit.
+  timerExpired = computed(() => !this.grantPermanent() && this.remainingSeconds() <= 0);
+  timerLabel = computed(() =>
+    this.grantPermanent() ? 'ALWAYS ON' : this.timerExpired() ? 'TIMER EXPIRED' : 'TIMER ACTIVE');
   timerHours = computed(() => this.format2(Math.floor(this.remainingSeconds() / 3600)));
   timerMinutes = computed(() => this.format2(Math.floor((this.remainingSeconds() % 3600) / 60)));
   timerSecondsDisplay = computed(() => this.format2(this.remainingSeconds() % 60));
   ringStyle = computed(() => {
+    if (this.grantPermanent()) return 'conic-gradient(var(--sec) 0 360deg)';
     const remaining = this.remainingSeconds();
     const duration = this.durationSeconds();
     if (remaining <= 0) return 'conic-gradient(var(--ring-empty) 0 360deg)';
@@ -218,6 +229,19 @@ export class DockerRightsPanelComponent implements OnInit {
         this.state.loadAll();
       },
       error: (e) => this.error.set(`Could not set the timer: ${e.message}`),
+    });
+  }
+
+  // Verleen permanente (altijd-aan) toegang — geen vervaltijd; intrekken via stopTimer().
+  setPermanent(): void {
+    const container = this.container();
+    if (!container) return;
+    this.api.setGrant(container, 0, true).subscribe({
+      next: (grant) => {
+        this.grantUntil.set(grant.until);
+        this.state.loadAll();
+      },
+      error: (e) => this.error.set(`Could not enable always-on access: ${e.message}`),
     });
   }
 

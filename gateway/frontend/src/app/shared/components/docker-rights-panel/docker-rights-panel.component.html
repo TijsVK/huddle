@@ -47,17 +47,22 @@
         <p>These actions are only allowed while the timer is active.</p>
       </div>
     </div>
-    <div class="da-timer" [class.expired]="timerExpired()">
+    <div class="da-timer" [class.expired]="timerExpired()" [class.permanent]="grantPermanent()">
       <div>
-        <p class="da-timer__label">{{ timerExpired() ? 'TIMER EXPIRED' : 'TIMER ACTIVE' }}</p>
-        <div class="da-digits">
-          <div class="da-box">{{ timerHours() }}</div>
-          <div class="da-colon">:</div>
-          <div class="da-box">{{ timerMinutes() }}</div>
-          <div class="da-colon">:</div>
-          <div class="da-box">{{ timerSecondsDisplay() }}</div>
-        </div>
-        <div class="da-unit-row"><span>HRS</span><span></span><span>MIN</span><span></span><span>SEC</span></div>
+        <p class="da-timer__label">{{ timerLabel() }}</p>
+        @if (grantPermanent()) {
+          <div class="da-digits"><div class="da-box da-box--infinity">∞</div></div>
+          <div class="da-unit-row"><span>ALWAYS ON</span></div>
+        } @else {
+          <div class="da-digits">
+            <div class="da-box">{{ timerHours() }}</div>
+            <div class="da-colon">:</div>
+            <div class="da-box">{{ timerMinutes() }}</div>
+            <div class="da-colon">:</div>
+            <div class="da-box">{{ timerSecondsDisplay() }}</div>
+          </div>
+          <div class="da-unit-row"><span>HRS</span><span></span><span>MIN</span><span></span><span>SEC</span></div>
+        }
       </div>
       <div class="da-ring" [style.background]="ringStyle()"></div>
     </div>
@@ -67,8 +72,9 @@
         <button class="btn" type="button" (click)="setTimer(5)">5 min</button>
         <button class="btn" type="button" (click)="setTimer(10)">10 min</button>
         <button class="btn" type="button" (click)="setTimer(30)">30 min</button>
+        <button class="btn" type="button" [class.on]="grantPermanent()" (click)="setPermanent()">Always on</button>
       </div>
-      <button class="btn btn-delete da-stop" type="button" [disabled]="timerExpired()" (click)="stopTimer()">Stop timer</button>
+      <button class="btn btn-delete da-stop" type="button" [disabled]="timerExpired() && !grantPermanent()" (click)="stopTimer()">Stop timer</button>
     </div>
   </div>
 
