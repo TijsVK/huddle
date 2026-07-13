@@ -9,6 +9,7 @@
     "directory": "gateway"
   },
   "scripts": {
+    "postinstall": "npm --prefix frontend install",
     "build:ts": "tsc",
     "build:ui": "npm run build --prefix frontend",
     "build": "npm run build:ui && npm run build:ts",

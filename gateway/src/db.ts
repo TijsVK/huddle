@@ -1,6 +1,15 @@
 import Database from 'better-sqlite3';
+import fs from 'fs';
+import path from 'path';
 
 const DB_PATH = process.env.DB_PATH || '/data/huddle.db';
+
+// Zorg dat de map bestaat voordat we de database openen; better-sqlite3 maakt
+// alleen het bestand aan, niet de bovenliggende map. In de container bestaat
+// /data al (zie Dockerfile), maar bij lokaal draaien buiten Docker niet.
+if (DB_PATH !== ':memory:') {
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+}
 
 export const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
