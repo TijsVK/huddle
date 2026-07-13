@@ -158,6 +158,45 @@
 .seg button.on i { background: var(--accent-soft); color: var(--accent); }
 
 /* ===== Search ===== */
+/* ===== Add-rule form ===== */
+.fw-add {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 10px;
+}
+.fw-add__domain {
+  flex: 1; min-width: 0;
+  padding: 9px 13px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface-2);
+  font: inherit; font-size: 13.5px; color: var(--text);
+  outline: none;
+}
+.fw-add__domain::placeholder { color: var(--text-dim); }
+.fw-add__domain:focus { border-color: var(--accent); }
+.fw-add__scope {
+  padding: 9px 11px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface-2);
+  font: inherit; font-size: 13px; color: var(--text);
+  outline: none; cursor: pointer;
+}
+.fw-add__btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 9px 13px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface-2);
+  font: inherit; font-size: 13px; font-weight: 600; color: var(--text);
+  cursor: pointer; white-space: nowrap;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.fw-add__btn:disabled { opacity: .5; cursor: not-allowed; }
+.fw-add__btn--allow:not(:disabled):hover {
+  background: var(--success-soft); border-color: var(--success); color: var(--success);
+}
+.fw-add__btn--deny:not(:disabled):hover {
+  background: var(--danger-soft); border-color: var(--danger); color: var(--danger);
+}
+
 .fw-search {
   display: flex; align-items: center; gap: 9px;
   padding: 9px 13px; margin-bottom: 8px;
@@ -218,6 +257,15 @@
   transition: all .14s;
 }
 .rule-row__del:hover { background: var(--danger-soft); color: var(--danger); }
+
+.rule-row__broaden {
+  width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
+  border: 0; background: none; cursor: pointer;
+  color: var(--text-dim);
+  display: grid; place-items: center;
+  transition: all .14s;
+}
+.rule-row__broaden:hover { background: var(--accent-soft); color: var(--accent); }
 
 /* ===== Path allowlist wrapper ===== */
 .path-list { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }

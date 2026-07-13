@@ -31,6 +31,9 @@ let matchDomain: typeof import('../src/rules').matchDomain;
 let matchPath: typeof import('../src/rules').matchPath;
 let firstSegmentPattern: typeof import('../src/rules').firstSegmentPattern;
 let isPathMode: typeof import('../src/rules').isPathMode;
+let normalizeDomain: typeof import('../src/rules').normalizeDomain;
+let parentWildcard: typeof import('../src/rules').parentWildcard;
+let rulesAbsorbedByWildcard: typeof import('../src/rules').rulesAbsorbedByWildcard;
 
 const CID = 'container-abc';
 
@@ -58,6 +61,9 @@ describe.skipIf(!sqliteAvailable)('checkRule', () => {
     matchPath = rulesMod.matchPath;
     firstSegmentPattern = rulesMod.firstSegmentPattern;
     isPathMode = rulesMod.isPathMode;
+    normalizeDomain = rulesMod.normalizeDomain;
+    parentWildcard = rulesMod.parentWildcard;
+    rulesAbsorbedByWildcard = rulesMod.rulesAbsorbedByWildcard;
     dbMod.initDb();
   });
   beforeEach(() => { db.exec('DELETE FROM rules'); db.exec('DELETE FROM containers'); });
@@ -169,6 +175,92 @@ describe.skipIf(!sqliteAvailable)('checkRule', () => {
     });
     it('is hoofdletter-ongevoelig', () => {
       expect(matchDomain('*.NPMJS.org', 'Registry.npmjs.ORG')).toBe(true);
+    });
+  });
+
+  describe('normalizeDomain (pure helper)', () => {
+    it('normaliseert exact domein (trim + lowercase)', () => {
+      expect(normalizeDomain('  Registry.NPMJS.org ')).toBe('registry.npmjs.org');
+    });
+    it('staat een leidende-label wildcard toe', () => {
+      expect(normalizeDomain('*.example.com')).toBe('*.example.com');
+    });
+    it('staat één-label host toe', () => {
+      expect(normalizeDomain('localhost')).toBe('localhost');
+    });
+    it('weigert kale * en TLD-brede wildcard', () => {
+      expect(normalizeDomain('*')).toBeNull();
+      expect(normalizeDomain('*.com')).toBeNull();
+    });
+    it('weigert wildcard die niet het volledige eerste label is', () => {
+      expect(normalizeDomain('*foo.example.com')).toBeNull();
+      expect(normalizeDomain('a.*.example.com')).toBeNull();
+      expect(normalizeDomain('**.example.com')).toBeNull();
+    });
+    it('weigert lege labels, spaties en lege invoer', () => {
+      expect(normalizeDomain('')).toBeNull();
+      expect(normalizeDomain('a..b.com')).toBeNull();
+      expect(normalizeDomain('.example.com')).toBeNull();
+      expect(normalizeDomain('example.com.')).toBeNull();
+      expect(normalizeDomain('foo .com')).toBeNull();
+    });
+    it('weigert ongeldige tekens in labels', () => {
+      expect(normalizeDomain('exa_mple.com')).toBeNull();
+      expect(normalizeDomain('-bad.com')).toBeNull();
+      expect(normalizeDomain('bad-.com')).toBeNull();
+    });
+  });
+
+  describe('parentWildcard (pure helper)', () => {
+    it('verbreedt een concrete host naar de bovenliggende wildcard', () => {
+      expect(parentWildcard('registry.npmjs.org')).toBe('*.npmjs.org');
+      expect(parentWildcard('a.b.example.com')).toBe('*.b.example.com');
+    });
+    it('geeft null voor een host met minder dan drie labels', () => {
+      expect(parentWildcard('npmjs.org')).toBeNull();
+    });
+    it('geeft null voor een patroon dat al een wildcard is', () => {
+      expect(parentWildcard('*.npmjs.org')).toBeNull();
+    });
+    it('het resultaat matcht de oorspronkelijke host maar niet de apex', () => {
+      const w = parentWildcard('registry.npmjs.org')!;
+      expect(matchDomain(w, 'registry.npmjs.org')).toBe(true);
+      expect(matchDomain(w, 'npmjs.org')).toBe(false);
+    });
+  });
+
+  describe('rulesAbsorbedByWildcard (pure helper)', () => {
+    const w = '*.npmjs.org';
+    it('absorbeert subdomeinen die de wildcard afdekt', () => {
+      const cands = [
+        { domain: 'registry.npmjs.org', status: 'requested' as const },
+        { domain: 'dist.npmjs.org', status: 'allow' as const },
+        { domain: 'a.b.npmjs.org', status: 'allow' as const },
+      ];
+      expect(rulesAbsorbedByWildcard(w, 'allow', cands).map((r) => r.domain)).toEqual([
+        'registry.npmjs.org', 'dist.npmjs.org', 'a.b.npmjs.org',
+      ]);
+    });
+    it('laat de apex en niet-matchende domeinen staan', () => {
+      const cands = [
+        { domain: 'npmjs.org', status: 'allow' as const },
+        { domain: 'evilnpmjs.org', status: 'requested' as const },
+      ];
+      expect(rulesAbsorbedByWildcard(w, 'allow', cands)).toEqual([]);
+    });
+    it('behoudt een bewuste tegengestelde beslissing (deny bij verbreden naar allow)', () => {
+      const cands = [
+        { domain: 'registry.npmjs.org', status: 'allow' as const },
+        { domain: 'evil.npmjs.org', status: 'deny' as const },
+      ];
+      expect(rulesAbsorbedByWildcard(w, 'allow', cands).map((r) => r.domain)).toEqual(['registry.npmjs.org']);
+    });
+    it('spiegelt: verbreden naar deny behoudt expliciete allow', () => {
+      const cands = [
+        { domain: 'registry.npmjs.org', status: 'deny' as const },
+        { domain: 'keep.npmjs.org', status: 'allow' as const },
+      ];
+      expect(rulesAbsorbedByWildcard(w, 'deny', cands).map((r) => r.domain)).toEqual(['registry.npmjs.org']);
     });
   });
 

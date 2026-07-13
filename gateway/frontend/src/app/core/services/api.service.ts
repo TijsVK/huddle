@@ -94,6 +94,17 @@ export class ApiService {
     return this.handle(this.http.post<Rule>('/api/rules', body));
   }
 
+  // Verbreedt een concrete host-regel naar zijn bovenliggende wildcard
+  // (registry.npmjs.org → *.npmjs.org) en absorbeert bestaande subdomein-regels.
+  // De respons bevat `absorbed`: het aantal opgeruimde regels.
+  broadenRule(
+    id: number,
+    status: 'allow' | 'deny' = 'allow',
+    scope: 'rule' | 'global' = 'global',
+  ): Observable<Rule & { absorbed: number }> {
+    return this.handle(this.http.post<Rule & { absorbed: number }>(`/api/rules/${id}/broaden`, { status, scope }));
+  }
+
   getContainerDetail(name: string): Observable<ContainerDetail> {
     return this.handle(this.http.get<ContainerDetail>(`/api/docker/containers/${name}`));
   }

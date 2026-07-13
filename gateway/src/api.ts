@@ -29,6 +29,7 @@ import {
   type IdeName,
 } from './docker';
 import { cidrToRange, isDevcontainerSource, type IpRange } from './net-gate';
+import { normalizeDomain, parentWildcard, rulesAbsorbedByWildcard } from './rules';
 import { attachTerminal } from './terminal';
 import { ptyManager } from './pty-manager';
 import { getCaCertPem } from './tls-ca';
@@ -343,6 +344,84 @@ export async function createApiServer(): Promise<FastifyInstance> {
     return updatedGlobal;
   });
 
+  // Verbreed een concrete host-regel naar zijn bovenliggende wildcard, bv.
+  // `registry.npmjs.org` → `*.npmjs.org`. Naast het aanmaken/bijwerken van de
+  // wildcard-regel worden bestaande host-only subdomein-regels die de wildcard nu
+  // afdekt geabsorbeerd (verwijderd) — zo verdwijnt de ruis van losse requested-
+  // en gelijkgerichte regels. Een bewuste tegengestelde beslissing blijft staan:
+  // verbreden naar 'allow' laat expliciete 'deny'-regels intact (en omgekeerd),
+  // want dat is juist de override die de operator wilde.
+  app.post<{
+    Params: { id: string };
+    Body: { status?: 'allow' | 'deny'; scope?: 'rule' | 'global'; expires_at?: number | null };
+  }>('/api/rules/:id/broaden', async (req, reply) => {
+    const id = Number(req.params.id);
+    const status = req.body.status ?? 'allow';
+    const scope = req.body.scope ?? 'global';
+    const expires_at = req.body.expires_at ?? null;
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return reply.code(400).send({ error: 'invalid rule id' });
+    }
+    if (status !== 'allow' && status !== 'deny') {
+      return reply.code(400).send({ error: 'status must be "allow" or "deny"' });
+    }
+    if (scope !== 'rule' && scope !== 'global') {
+      return reply.code(400).send({ error: 'scope must be "rule" or "global"' });
+    }
+
+    const rule = db.prepare(`SELECT * FROM rules WHERE id = ?`).get(id) as Rule | undefined;
+    if (!rule) return reply.code(404).send({ error: 'not_found' });
+
+    const wildcard = parentWildcard(rule.domain);
+    if (!wildcard) {
+      return reply.code(400).send({ error: `kan "${rule.domain}" niet verbreden tot een wildcard` });
+    }
+
+    const targetContainer = scope === 'global' ? null : rule.container_id;
+
+    const apply = db.transaction(() => {
+      // Wildcard-regel (host-only) upserten in de doel-scope.
+      let wildcardRule = db
+        .prepare(
+          `SELECT * FROM rules WHERE domain = ? AND COALESCE(container_id, '') = COALESCE(?, '') AND path_pattern IS NULL`
+        )
+        .get(wildcard, targetContainer) as Rule | undefined;
+      if (wildcardRule) {
+        db.prepare(`UPDATE rules SET status = ?, expires_at = ?, updated_at = unixepoch() WHERE id = ?`)
+          .run(status, expires_at, wildcardRule.id);
+      } else {
+        const info = db
+          .prepare(`INSERT INTO rules (domain, container_id, status, expires_at) VALUES (?, ?, ?, ?)`)
+          .run(wildcard, targetContainer, status, expires_at);
+        wildcardRule = db.prepare(`SELECT * FROM rules WHERE id = ?`).get(info.lastInsertRowid) as Rule;
+      }
+
+      // Absorbeer host-only regels die de wildcard nu afdekt, behalve een bewuste
+      // tegengestelde beslissing. Matchen gebeurt in JS (de SQL kent geen
+      // wildcard-logica); de wildcard-regel zelf sluiten we via id uit.
+      //
+      // Scope-bewust: een globale wildcard mag alles absorberen wat hij afdekt
+      // (hij dekt diezelfde containers immers ook), maar een container-wildcard
+      // raakt UITSLUITEND regels van diezelfde container — anders zou verbreden
+      // naar één container een bredere globale regel weghalen en daarmee andere
+      // containers stilletjes ontregelen.
+      const hostOnly = (targetContainer === null
+        ? db.prepare(`SELECT * FROM rules WHERE path_pattern IS NULL AND id != ?`).all(wildcardRule.id)
+        : db.prepare(`SELECT * FROM rules WHERE path_pattern IS NULL AND id != ? AND container_id = ?`).all(wildcardRule.id, targetContainer)
+      ) as Rule[];
+      const del = db.prepare(`DELETE FROM rules WHERE id = ?`);
+      const absorbedRules = rulesAbsorbedByWildcard(wildcard, status, hostOnly);
+      for (const r of absorbedRules) del.run(r.id);
+      return { wildcardRule, absorbed: absorbedRules.length };
+    });
+
+    const { wildcardRule, absorbed } = apply();
+    logAudit({ containerId: targetContainer, domain: wildcard, action: `admin:rule-broaden-${status}`, ruleId: wildcardRule.id });
+    notifyStateChanged();
+    return { ...wildcardRule, absorbed };
+  });
+
   // Zet een domein in/uit pad-allowlist modus. Werkt op de host-only regel
   // (path_pattern IS NULL): bij aanzetten wordt het kale domein op 'deny' gezet
   // met path_mode=1, zodat onbekende subpaden voortaan als 'requested' worden
@@ -377,19 +456,23 @@ export async function createApiServer(): Promise<FastifyInstance> {
     if (!domain || !['requested', 'allow', 'deny'].includes(status)) {
       return reply.code(400).send({ error: 'invalid payload' });
     }
+    const normalizedDomain = normalizeDomain(domain);
+    if (!normalizedDomain) {
+      return reply.code(400).send({ error: `ongeldig domein "${domain}" — gebruik bv. example.com of *.example.com` });
+    }
     try {
       const info = db
         .prepare(
           `INSERT INTO rules (domain, container_id, status, expires_at, path_pattern) VALUES (?, ?, ?, ?, ?)`
         )
-        .run(domain, container_id, status, expires_at, path_pattern);
+        .run(normalizedDomain, container_id, status, expires_at, path_pattern);
       const inserted = db.prepare(`SELECT * FROM rules WHERE id = ?`).get(info.lastInsertRowid) as Rule;
       // Ruim alleen de host-only requested-rij op; padregels per domein blijven
       // staan zodat fijnmazig beleid naast elkaar kan bestaan.
       if (container_id === null && path_pattern === null && (status === 'allow' || status === 'deny')) {
-        db.prepare(`DELETE FROM rules WHERE domain = ? AND status = 'requested' AND path_pattern IS NULL`).run(domain);
+        db.prepare(`DELETE FROM rules WHERE domain = ? AND status = 'requested' AND path_pattern IS NULL`).run(normalizedDomain);
       }
-      logAudit({ containerId: container_id, domain, action: `admin:rule-${status}`, ruleId: Number(info.lastInsertRowid) });
+      logAudit({ containerId: container_id, domain: normalizedDomain, action: `admin:rule-${status}`, ruleId: Number(info.lastInsertRowid) });
       notifyStateChanged();
       return inserted;
     } catch (err: any) {

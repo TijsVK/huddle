@@ -36,6 +36,60 @@ export function matchDomain(pattern: string, host: string): boolean {
   return suffix.every((seg, i) => seg === hostSuffix[i]);
 }
 
+// Eén DNS-label: alfanumeriek met optioneel koppeltekens binnenin (niet aan de
+// rand). Geen onderstrepingen of andere tekens — bewust strikt.
+const DNS_LABEL = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+
+// Normaliseert + valideert een handmatig ingevoerd domeinpatroon voor opslag.
+// Geeft het genormaliseerde (lowercase, getrimde) patroon terug, of null als het
+// ongeldig is. Toegestaan: een exact domein (`api.example.com`, ook één label)
+// of een wildcard met `*` als volledig eerste label (`*.example.com`). Een
+// wildcard vereist minstens twee labels ná de `*.` zodat een TLD-brede regel
+// (`*.com`) of een kale `*` niet per ongeluk ontstaat — dat sluit aan op
+// matchDomain, dat wildcards alleen als leidend label ondersteunt.
+export function normalizeDomain(input: string): string | null {
+  if (typeof input !== 'string') return null;
+  const d = input.trim().toLowerCase();
+  if (!d || /\s/.test(d)) return null;
+  const labels = d.split('.');
+  if (labels.some((l) => l === '')) return null; // geen lege labels (leidende/dubbele/afsluitende punt)
+
+  const isWildcard = labels[0] === '*';
+  const rest = isWildcard ? labels.slice(1) : labels;
+  if (rest.length === 0) return null;
+  if (isWildcard && rest.length < 2) return null; // weiger `*` en `*.com`
+  if (!rest.every((l) => DNS_LABEL.test(l))) return null;
+  return d;
+}
+
+// Berekent het bovenliggende wildcard-patroon waarmee een concrete host wordt
+// verbreed: `registry.npmjs.org` → `*.npmjs.org` (het meest linkse label valt
+// weg). Geeft null als verbreden niet zinvol/veilig is: voor een patroon dat al
+// een wildcard is, of voor een host met minder dan drie labels (anders zou het
+// suffix maar één label hebben, bv. `*.org`).
+export function parentWildcard(domain: string): string | null {
+  const d = domain.trim().toLowerCase();
+  if (d.startsWith('*.')) return null;
+  const labels = d.split('.');
+  if (labels.length < 3) return null;
+  return '*.' + labels.slice(1).join('.');
+}
+
+// Bepaalt welke host-only regels door een nieuwe wildcard worden geabsorbeerd
+// bij het verbreden. Een kandidaat wordt geabsorbeerd als de wildcard zijn
+// domein afdekt (matchDomain), behalve een bewuste tegengestelde beslissing:
+// verbreden naar 'allow' laat expliciete 'deny'-regels staan en omgekeerd, want
+// dat is juist de override die de operator wilde. De aanroeper sluit de
+// wildcard-regel zelf al uit de kandidaten uit.
+export function rulesAbsorbedByWildcard<T extends { domain: string; status: RuleStatus }>(
+  wildcard: string,
+  status: 'allow' | 'deny',
+  candidates: T[],
+): T[] {
+  const opposite = status === 'allow' ? 'deny' : 'allow';
+  return candidates.filter((r) => r.status !== opposite && matchDomain(wildcard, r.domain));
+}
+
 // Matcht een padpatroon tegen een pad. Een null/leeg patroon is een host-only
 // regel en matcht elk pad. `*` aan het eind is een prefix-match
 // (`/api/v1/*` matcht `/api/v1/foo`); anders exacte gelijkheid.

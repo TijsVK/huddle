@@ -40,11 +40,20 @@ export class FirewallComponent {
   toasts: Toast[] = [];
   resolving = new Set<number>();
 
+  // ── "Add rule" form state (manual / wildcard rules) ──
+  newDomain = '';
+  newScope = '';      // '' = globaal; anders de containernaam (== container_id)
+  addBusy = false;
+  containers$ = this.state.containers$;
+
   readonly pieConfig: PieMenuConfig = {
     families: [
       {
         id: 'approve', label: 'Allow', tone: 'green', icon: 'approve',
-        variants: [{ id: 'approve-all', label: 'Allow globally', icon: 'approve-all' }],
+        variants: [
+          { id: 'approve-all', label: 'Allow globally', icon: 'approve-all' },
+          { id: 'approve-wild', label: 'Allow *.parent', icon: 'approve-all' },
+        ],
       },
       {
         id: 'temp', label: 'Temp 5 min', tone: 'blue', icon: 'timer',
@@ -99,6 +108,8 @@ export class FirewallComponent {
         this.pushToast(rule.domain, 'Allowed for this container', 'allow'); break;
       case 'approve-all':
         this.modal.openConfirm(rule, 'allow'); break;
+      case 'approve-wild':
+        this.broaden(rule); break;
       case 'temp':
         this.resolve(rule, () => this.allowTimed(rule, 5));
         this.pushToast(rule.domain, 'Allowed for 5 minutes', 'temp'); break;
@@ -176,6 +187,73 @@ export class FirewallComponent {
   );
 
   reload(): void { this.state.loadAll(); }
+
+  // Bovenliggende wildcard van een concrete host (registry.npmjs.org →
+  // *.npmjs.org). Spiegelt parentWildcard in de backend: null als al een
+  // wildcard, of bij minder dan drie labels (anders zou het suffix maar één
+  // label hebben, bv. *.org).
+  parentWildcard(domain: string): string | null {
+    const d = (domain ?? '').trim().toLowerCase();
+    if (d.startsWith('*.')) return null;
+    const labels = d.split('.');
+    if (labels.length < 3) return null;
+    return '*.' + labels.slice(1).join('.');
+  }
+
+  // Kan deze regel verbreed worden? Alleen als er een bovenliggende wildcard is
+  // (geen kale 2-label host, en niet al een wildcard).
+  canBroaden(rule: Rule): boolean {
+    return this.parentWildcard(rule.domain) !== null;
+  }
+
+  private doBroaden(rule: Rule, status: 'allow' | 'deny', scope: 'rule' | 'global'): void {
+    const wildcard = this.parentWildcard(rule.domain);
+    if (!wildcard) {
+      this.pushToast(rule.domain, 'cannot broaden to a wildcard', 'deny');
+      return;
+    }
+    this.resolve(rule, () =>
+      this.api.broadenRule(rule.id, status, scope).subscribe({
+        next: (r) => {
+          this.state.loadAll();
+          const extra = r?.absorbed ? ` · absorbed ${r.absorbed}` : '';
+          const where = scope === 'global' ? 'globally' : 'for ' + this.shortContainer(rule.container_id);
+          this.pushToast(wildcard, `${status === 'allow' ? 'allowed' : 'denied'} ${where}${extra}`, status);
+        },
+        error: (e: Error) => this.pushToast(rule.domain, e.message ?? 'broaden failed', 'deny'),
+      })
+    );
+  }
+
+  // Pending verzoek → goedkeuren als globale wildcard-allow.
+  broaden(rule: Rule): void {
+    this.doBroaden(rule, 'allow', 'global');
+  }
+
+  // Bestaande allow/deny-regel → verbreden met behoud van zijn status én scope
+  // (een container-deny wordt de wildcard-deny van diezelfde container).
+  broadenExisting(rule: Rule): void {
+    this.doBroaden(rule, rule.status === 'deny' ? 'deny' : 'allow', rule.container_id ? 'rule' : 'global');
+  }
+
+  addRule(status: 'allow' | 'deny'): void {
+    const domain = this.newDomain.trim();
+    if (!domain || this.addBusy) return;
+    const container_id = this.newScope || null;
+    this.addBusy = true;
+    this.api.createRule(domain, container_id, status).subscribe({
+      next: () => {
+        this.addBusy = false;
+        this.newDomain = '';
+        this.state.loadAll();
+        this.pushToast(domain, status === 'allow' ? 'rule added' : 'rule denied', status);
+      },
+      error: (e: Error) => {
+        this.addBusy = false;
+        this.pushToast(domain, e.message ?? 'could not add rule', 'deny');
+      },
+    });
+  }
 
   enablePathMode(rule: Rule): void { this.api.setPathMode(rule.id, true).subscribe(() => this.state.loadAll()); }
   allowRule(rule: Rule): void      { this.api.resolveRule(rule.id, 'allow').subscribe(() => this.state.loadAll()); }
