@@ -1,0 +1,34 @@
+# Lean stand-in for a Huddle devcontainer, used by the DinD tool-compat harness.
+# Mirrors what base-devimage provides (docker CLI + compose + node + iptables)
+# plus a few tool binaries (kubectl, kind, k3d, jq) so the harness can drive
+# real dev tools against the per-devcontainer private daemon.
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gnupg iptables jq git wget xz-utils procps iproute2 \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+       > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin docker-buildx-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node 22 (Testcontainers-node, misc)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# kubectl + kind + k3d (Kubernetes-in-Docker tools)
+RUN ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.31.4/bin/linux/${ARCH}/kubectl" \
+    && chmod +x /usr/local/bin/kubectl \
+    && curl -fsSL -o /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-${ARCH}" \
+    && chmod +x /usr/local/bin/kind \
+    && curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG=v5.8.3 bash
+
+RUN useradd -m -s /bin/bash dev
+WORKDIR /home/dev
+CMD ["sleep", "infinity"]

@@ -76,17 +76,34 @@ the filtering socket-proxy.
 ## Task checklist
 - [x] Explore architecture, read Aspire issues #12/#61, lock Design N
 - [x] Create branch + this doc
-- [ ] gh: user logs in as TijsVK; fork infosupport/huddle → TijsVK; add remote
-- [ ] Gateway: sidecar bring-up (`dind.ts`) + DOCKER_HOST rewire under HUDDLE_DIND
-- [ ] Gateway: proxy/CA injection into the private daemon for nested containers
-- [ ] Gateway: permanent-grant + root-grant (default user) support
+- [x] gh: logged in as TijsVK; forked infosupport/huddle → TijsVK; remote `fork` added; branch pushed
+- [x] Gateway: sidecar bring-up (`dind.ts`) + DOCKER_HOST rewire under HUDDLE_DIND
+- [x] Gateway: proxy injection into the private daemon for nested containers (client-config proxies.default)
+- [x] CLI: HUDDLE_DIND plumbing to the gateway
+- [x] Build: gateway typecheck clean, 204 vitest pass, cli typecheck clean
+- [x] Tool-compat harness (Tier-1): compose, testcontainers, buildx, privileged, k3d, localstack ALL FULLY PASS
+- [ ] Tier-2 egress harness (`tools/egress.sh` written — RUN it)
+- [ ] Aspire deep test (`tools/aspire.sh`) — repro #12 + #61
+- [ ] More tools: act (GH Actions), skaffold/tilt, devcontainer-cli, minikube(docker), dagger
+- [ ] `run.sh` runner → `docs/dind/RESULTS.md`
+- [ ] Feature: root-for-vscode grant (time-limited + permanent) replacing noot dance
+- [ ] Feature: permanent (non-expiring) docker grant
 - [ ] Frontend: portal toggles for permanent grant + root grant
-- [ ] CLI: HUDDLE_DIND plumbing to the gateway
-- [ ] Tests: keep classic green; add DinD-mode + grant tests
-- [ ] Build: gateway `npm run build`, cli typecheck, vitest
-- [ ] Smoke test: sidecar dockerd + shared netns + compose workload + egress
-- [ ] Docs: architecture doc + README notes
+- [ ] Docs: `docs/dind/ARCHITECTURE.md` + README notes
 - [ ] Commit incrementally; push to TijsVK fork
 
 ## Smoke-test notes
-(fill in as runs happen)
+
+### 2026-07-17 — Design N core mechanism validated (Docker 29 host)
+Manual test outside huddle: devcontainer (`docker:28-cli`) + `dind-` sidecar
+(`docker:28-dind`, `--privileged`, `--network container:<dc>`, shared socket
+volume, `dockerd --host=unix:///var/run/dind/docker.sock`).
+- Inner dockerd up in ~1s; devcontainer talks to it via the shared socket. ✓
+- Nested `docker run -d -p 8080:80 nginx` ✓
+- `docker inspect web` ✓ — the exact op that fails today with
+  *"container not owned by this devcontainer"* (issue #61).
+- Published port reachable from devcontainer at `localhost:8080` **and**
+  `[::1]:8080` (what Aspire DCP addresses) — shared netns works. ✓
+- `docker compose version` present in `docker:28-cli`. ✓
+Conclusion: sidecar-shares-netns topology delivers the Aspire fix. Proceed.
+
