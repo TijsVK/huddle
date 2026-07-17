@@ -4,6 +4,7 @@ import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { StateService } from '../../../core/services/state.service';
 import { ApiService } from '../../../core/services/api.service';
 import { DockerActionDef, DockerActionGroup, DockerActionKind } from '../../../core/models/docker-action.model';
+import { PERMANENT_UNTIL } from '../../../core/models/grant.model';
 
 interface GroupMeta {
   title: string;
@@ -115,15 +116,43 @@ export class DockerRightsPanelComponent implements OnInit {
   durationSeconds = signal(0);
   private now = signal(Math.floor(Date.now() / 1000));
 
+  /** Root grant (`until` unix seconds) for the container, or null when off. */
+  rootUntil = signal<number | null>(null);
+
+  rootPermanent = computed(() => {
+    const until = this.rootUntil();
+    return until !== null && until >= PERMANENT_UNTIL;
+  });
+  rootRemainingSeconds = computed(() => {
+    const until = this.rootUntil();
+    if (until === null || until >= PERMANENT_UNTIL) return 0;
+    return Math.max(0, until - this.now());
+  });
+  rootActive = computed(() => this.rootPermanent() || this.rootRemainingSeconds() > 0);
+  rootStatus = computed(() => {
+    if (this.rootPermanent()) return 'root: permanent';
+    const remaining = this.rootRemainingSeconds();
+    if (remaining <= 0) return 'root: off';
+    const minutes = Math.ceil(remaining / 60);
+    return `root: ${minutes}m left`;
+  });
+
+  /** Docker grant never expires (sentinel `until`). */
+  isPermanent = computed(() => {
+    const until = this.grantUntil();
+    return until !== null && until >= PERMANENT_UNTIL;
+  });
   remainingSeconds = computed(() => {
     const until = this.grantUntil();
-    return until ? Math.max(0, until - this.now()) : 0;
+    if (until === null || until >= PERMANENT_UNTIL) return 0;
+    return Math.max(0, until - this.now());
   });
-  timerExpired = computed(() => this.remainingSeconds() <= 0);
+  timerExpired = computed(() => !this.isPermanent() && this.remainingSeconds() <= 0);
   timerHours = computed(() => this.format2(Math.floor(this.remainingSeconds() / 3600)));
   timerMinutes = computed(() => this.format2(Math.floor((this.remainingSeconds() % 3600) / 60)));
   timerSecondsDisplay = computed(() => this.format2(this.remainingSeconds() % 60));
   ringStyle = computed(() => {
+    if (this.isPermanent()) return 'conic-gradient(var(--sec) 0 360deg)';
     const remaining = this.remainingSeconds();
     const duration = this.durationSeconds();
     if (remaining <= 0) return 'conic-gradient(var(--ring-empty) 0 360deg)';
@@ -141,13 +170,17 @@ export class DockerRightsPanelComponent implements OnInit {
       const tick = setInterval(() => this.now.set(Math.floor(Date.now() / 1000)), 1000);
       this.destroyRef.onDestroy(() => clearInterval(tick));
     }
-    // When the container input is (re)set: reload policies + grant.
+    // When the container input is (re)set: reload policies + grant + root grant.
     effect(() => {
       const container = this.container();
       this.grantUntil.set(null);
       this.durationSeconds.set(0);
       this.policies.set({});
-      if (container) this.loadPolicies(container);
+      this.rootUntil.set(null);
+      if (container) {
+        this.loadPolicies(container);
+        this.loadRootGrant(container);
+      }
     });
   }
 
@@ -221,6 +254,19 @@ export class DockerRightsPanelComponent implements OnInit {
     });
   }
 
+  setPermanentTimer(): void {
+    const container = this.container();
+    if (!container) return;
+    this.api.setGrant(container, 0, true).subscribe({
+      next: (grant) => {
+        this.grantUntil.set(grant.until);
+        this.durationSeconds.set(0);
+        this.state.loadAll();
+      },
+      error: (e) => this.error.set(`Could not set a permanent grant: ${e.message}`),
+    });
+  }
+
   stopTimer(): void {
     const container = this.container();
     if (!container) return;
@@ -230,6 +276,41 @@ export class DockerRightsPanelComponent implements OnInit {
         this.state.loadAll();
       },
       error: (e) => this.error.set(`Could not stop the timer: ${e.message}`),
+    });
+  }
+
+  // ── Root access ──────────────────────────────────────────────────────────────
+  private loadRootGrant(container: string): void {
+    this.api.getRootGrant(container).subscribe({
+      next: (g) => this.rootUntil.set(g.until > 0 ? g.until : null),
+      error: () => this.rootUntil.set(null),
+    });
+  }
+
+  setRoot(minutes: number): void {
+    const container = this.container();
+    if (!container) return;
+    this.api.setRootGrant(container, minutes).subscribe({
+      next: (g) => this.rootUntil.set(g.until),
+      error: (e) => this.error.set(`Could not grant root access: ${e.message}`),
+    });
+  }
+
+  setRootPermanent(): void {
+    const container = this.container();
+    if (!container) return;
+    this.api.setRootGrant(container, 0, true).subscribe({
+      next: (g) => this.rootUntil.set(g.until),
+      error: (e) => this.error.set(`Could not grant permanent root access: ${e.message}`),
+    });
+  }
+
+  revokeRoot(): void {
+    const container = this.container();
+    if (!container) return;
+    this.api.deleteRootGrant(container).subscribe({
+      next: () => this.rootUntil.set(null),
+      error: (e) => this.error.set(`Could not revoke root access: ${e.message}`),
     });
   }
 

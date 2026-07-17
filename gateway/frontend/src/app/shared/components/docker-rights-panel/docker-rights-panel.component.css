@@ -92,6 +92,15 @@
 .da-extend__buttons { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
 .da-stop { min-width: 150px; justify-content: center; }
 
+/* Permanent-weergave in de timer (i.p.v. de aftellende cijfers) */
+.da-perm { height: 66px; display: flex; align-items: center; color: var(--sec); font-size: 26px; font-weight: 800; }
+/* ── Root access ─────────────────────────────────────────────────────────── */
+.da-root { display: flex; align-items: center; justify-content: space-between; gap: 24px; border-top: 1px solid var(--border); padding-top: 22px; }
+.da-root .da-intro { min-height: 0; }
+.da-root__controls { display: flex; flex-direction: column; gap: 10px; }
+.da-root__controls .da-extend__buttons { margin-bottom: 0; }
+.da-root__status.on { color: var(--sec); }
+
 /* ── Kaart-grid ──────────────────────────────────────────────────────────── */
 .da-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
 .da-card {

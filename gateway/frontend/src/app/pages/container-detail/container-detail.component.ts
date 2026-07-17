@@ -24,7 +24,7 @@ interface DetailData {
   airlocked?: boolean;
 }
 
-type DetailTab = 'firewall' | 'docker' | 'noot' | 'terminal';
+type DetailTab = 'firewall' | 'docker' | 'terminal';
 type RulesTab  = 'allow' | 'deny' | 'path';
 
 @Component({
@@ -89,9 +89,6 @@ export class ContainerDetailComponent implements OnInit {
 
   detail$ = new BehaviorSubject<DetailData | null>(null);
   error$ = new BehaviorSubject<string | null>(null);
-  credentials: { password: string; createdAt: number } | null = null;
-  passwordVisible = false;
-  copied = false;
   activeTab: DetailTab = 'firewall';
   rulesTab: RulesTab = 'allow';
   reconnectStatus = '';
@@ -108,10 +105,6 @@ export class ContainerDetailComponent implements OnInit {
     this.name = this.route.snapshot.paramMap.get('name') ?? '';
     this.load();
     this.loadPorts();
-    this.api.getContainerCredentials(this.name).subscribe({
-      next: (c) => this.credentials = c,
-      error: () => this.credentials = null,
-    });
   }
 
   loadPorts(): void {
@@ -168,14 +161,6 @@ export class ContainerDetailComponent implements OnInit {
   allowTimed(rule: Rule, minutes: number): void {
     const expires_at = Math.floor(Date.now() / 1000) + minutes * 60;
     this.api.resolveRule(rule.id, 'allow', 'rule', expires_at).subscribe(() => { this.state.loadAll(); this.load(); });
-  }
-
-  copyPassword(): void {
-    if (!this.credentials) return;
-    navigator.clipboard.writeText(this.credentials.password).then(() => {
-      this.copied = true;
-      setTimeout(() => { this.copied = false; }, 2000);
-    });
   }
 
   setTab(t: DetailTab): void { this.activeTab = t; }

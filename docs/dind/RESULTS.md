@@ -13,6 +13,8 @@ Host used for these runs: Docker 29.x, `docker:28-dind` sidecar, `docker:28-cli`
 based test devcontainer. Tier-1 = tools on a normal network; Tier-2 (`egress`) =
 the real Huddle constraint (internal network, all egress via a forward proxy).
 
+**11 / 11 tools fully pass**, each with functional assertions.
+
 | Tool | Result | What was proven (functional, not just "started") |
 |------|--------|--------------------------------------------------|
 | docker compose | ✅ pass | healthcheck-gated `up --wait`, service-name DNS, published port on `localhost` **and** `[::1]` |
@@ -25,7 +27,7 @@ the real Huddle constraint (internal network, all egress via a forward proxy).
 | Dev Containers CLI | ✅ pass | `devcontainer up` (build+start), **workspace files visible inside nested devcontainer**, `exec` |
 | workspace bind-through | ✅ pass | shared workspace readable+writable in nested containers (both directions); non-shared path limitation asserted |
 | egress (Tier-2) | ✅ pass | no direct internet without proxy; proxied HTTPS; image pull via proxy; nested egress via injected proxy; **loopback NOT proxied on `localhost` and `[::1]` (Aspire #12 fix)** |
-| .NET Aspire | ⏳ running | #12 403 / CopyFile and #61 inspect-ownership all absent so far; container-Running assertion being finalized |
+| .NET Aspire | ✅ pass | DCP-spawned container reaches **Running**; **no #12 403**, **no CopyFile block**, **no #61 "not owned by this devcontainer"** |
 
 ## Why these were failing before (classic socket-proxy)
 

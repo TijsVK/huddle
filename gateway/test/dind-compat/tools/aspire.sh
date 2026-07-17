@@ -43,7 +43,7 @@ builder.AddContainer("repro", "nginx", "alpine");
 builder.Build().Run();
 CS
 
-DENV='export PATH=$HOME/.dotnet:$PATH DOTNET_ROOT=$HOME/.dotnet DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 ASPIRE_ALLOW_UNSECURED_TRANSPORT=true'
+DENV='export PATH=$HOME/.dotnet:$PATH DOTNET_ROOT=$HOME/.dotnet DOTNET_CLI_TELEMETRY_OPTOUT=1 ASPIRE_ALLOW_UNSECURED_TRANSPORT=true'
 
 # Pre-restore so first-run nuget download isn't counted against the run timeout.
 log "$NAME: dotnet restore"

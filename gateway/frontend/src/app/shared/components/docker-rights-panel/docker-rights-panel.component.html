@@ -49,15 +49,19 @@
     </div>
     <div class="da-timer" [class.expired]="timerExpired()">
       <div>
-        <p class="da-timer__label">{{ timerExpired() ? 'TIMER EXPIRED' : 'TIMER ACTIVE' }}</p>
-        <div class="da-digits">
-          <div class="da-box">{{ timerHours() }}</div>
-          <div class="da-colon">:</div>
-          <div class="da-box">{{ timerMinutes() }}</div>
-          <div class="da-colon">:</div>
-          <div class="da-box">{{ timerSecondsDisplay() }}</div>
-        </div>
-        <div class="da-unit-row"><span>HRS</span><span></span><span>MIN</span><span></span><span>SEC</span></div>
+        <p class="da-timer__label">{{ isPermanent() ? 'PERMANENT' : (timerExpired() ? 'TIMER EXPIRED' : 'TIMER ACTIVE') }}</p>
+        @if (isPermanent()) {
+          <div class="da-perm">PERMANENT</div>
+        } @else {
+          <div class="da-digits">
+            <div class="da-box">{{ timerHours() }}</div>
+            <div class="da-colon">:</div>
+            <div class="da-box">{{ timerMinutes() }}</div>
+            <div class="da-colon">:</div>
+            <div class="da-box">{{ timerSecondsDisplay() }}</div>
+          </div>
+          <div class="da-unit-row"><span>HRS</span><span></span><span>MIN</span><span></span><span>SEC</span></div>
+        }
       </div>
       <div class="da-ring" [style.background]="ringStyle()"></div>
     </div>
@@ -67,8 +71,30 @@
         <button class="btn" type="button" (click)="setTimer(5)">5 min</button>
         <button class="btn" type="button" (click)="setTimer(10)">10 min</button>
         <button class="btn" type="button" (click)="setTimer(30)">30 min</button>
+        <button class="btn" type="button" [class.btn--accent]="isPermanent()" (click)="setPermanentTimer()">Permanent</button>
       </div>
-      <button class="btn btn-delete da-stop" type="button" [disabled]="timerExpired()" (click)="stopTimer()">Stop timer</button>
+      <button class="btn btn-delete da-stop" type="button" [disabled]="timerExpired() && !isPermanent()" (click)="stopTimer()">Stop timer</button>
+    </div>
+  </div>
+
+  <!-- ── Root access ─────────────────────────────────────────────────────── -->
+  <div class="da-root">
+    <div class="da-intro">
+      <div class="da-intro__badge"><svg class="da-ic"><use href="#da-shield"/></svg></div>
+      <div>
+        <h2>ROOT ACCESS</h2>
+        <p>Give the default <b>vscode</b> user passwordless sudo for a limited time.</p>
+      </div>
+    </div>
+    <div class="da-root__controls">
+      <span class="da-timer__label da-root__status" [class.on]="rootActive()">{{ rootStatus() }}</span>
+      <div class="da-extend__buttons">
+        <button class="btn" type="button" (click)="setRoot(15)">15 min</button>
+        <button class="btn" type="button" (click)="setRoot(30)">30 min</button>
+        <button class="btn" type="button" (click)="setRoot(60)">60 min</button>
+        <button class="btn" type="button" [class.btn--accent]="rootPermanent()" (click)="setRootPermanent()">Permanent</button>
+        <button class="btn btn-delete" type="button" [disabled]="!rootActive()" (click)="revokeRoot()">Revoke</button>
+      </div>
     </div>
   </div>
 

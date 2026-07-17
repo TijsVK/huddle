@@ -4,7 +4,7 @@ import { Observable, throwError } from 'rxjs';
 import { catchError } from 'rxjs/operators';
 import { Container, ContainerDetail, DockerImage } from '../models/container.model';
 import { Rule, RuleStatus } from '../models/rule.model';
-import { Grant, GrantMap } from '../models/grant.model';
+import { Grant, GrantMap, RootGrant, RootGrantMap } from '../models/grant.model';
 import { DockerActionCatalog, DockerActionPolicies, DockerActionPolicyResult } from '../models/docker-action.model';
 import { AuditLog } from '../models/audit-log.model';
 import { Extension } from '../extensions/extension.model';
@@ -98,10 +98,6 @@ export class ApiService {
     return this.handle(this.http.get<ContainerDetail>(`/api/docker/containers/${name}`));
   }
 
-  getContainerCredentials(name: string): Observable<{ password: string; createdAt: number }> {
-    return this.handle(this.http.get<{ password: string; createdAt: number }>(`/api/docker/containers/${name}/credentials`));
-  }
-
   snapshotContainer(name: string, imageName: string): Observable<{ imageId: string }> {
     return this.handle(this.http.post<{ imageId: string }>(`/api/docker/containers/${name}/snapshot`, { imageName }));
   }
@@ -129,12 +125,32 @@ export class ApiService {
     return this.handle(this.http.post<{ ok: boolean }>(`/api/docker/containers/${encodeURIComponent(name)}/start`, {}));
   }
 
-  setGrant(container: string, minutes: number): Observable<Grant> {
-    return this.handle(this.http.put<Grant>(`/api/authz/grants/${container}`, { minutes }));
+  setGrant(container: string, minutes: number, permanent = false): Observable<Grant> {
+    return this.handle(this.http.put<Grant>(`/api/authz/grants/${container}`, { minutes, permanent }));
   }
 
   deleteGrant(container: string): Observable<void> {
     return this.handle(this.http.delete<void>(`/api/authz/grants/${container}`));
+  }
+
+  // ── Root grants (passwordless sudo for the default `vscode` user) ──────────
+  getRootGrants(): Observable<RootGrantMap> {
+    return this.handle(this.http.get<RootGrantMap>('/api/authz/root-grants'));
+  }
+
+  getRootGrant(container: string): Observable<RootGrant> {
+    return this.handle(this.http.get<RootGrant>(`/api/authz/root-grants/${encodeURIComponent(container)}`));
+  }
+
+  setRootGrant(container: string, minutes: number, permanent = false): Observable<{ container: string; until: number; permanent: boolean }> {
+    return this.handle(this.http.put<{ container: string; until: number; permanent: boolean }>(
+      `/api/authz/root-grants/${encodeURIComponent(container)}`,
+      { minutes, permanent },
+    ));
+  }
+
+  deleteRootGrant(container: string): Observable<{ ok: boolean }> {
+    return this.handle(this.http.delete<{ ok: boolean }>(`/api/authz/root-grants/${encodeURIComponent(container)}`));
   }
 
   // ── Docker action policies (fine-grained Docker permissions) ───────────────
