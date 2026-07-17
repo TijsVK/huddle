@@ -40,6 +40,9 @@ the real Huddle constraint (internal network, all egress via a forward proxy).
 | local registry | ✅ pass | build → push → pull → run round-trip to a nested `registry:2` |
 | resource limits | ✅ pass | `--memory` / `--cpus` / `--pids-limit` enforced on nested containers (cgroup-v2 delegation) |
 | restart resilience | ✅ pass | after a gateway restart: egress restored (dc-net rejoin + iptables refresh), private daemon reachable, root grant persists, sidecar running |
+| helm on k3d | ✅ pass | scaffold a chart, `helm install --wait` → release deployed, pod Running |
+| toolchain: pip | ✅ pass | `pip install` through the MITM (PIP_CERT fix — pip's certifi bundle) |
+| toolchain: maven/JVM | ✅ pass | reaches Maven Central through the MITM, JVM trusts the CA (no TLS error) via ca-certificates-java |
 | **migration** classic→DinD | ✅ pass | classic devcontainer + firewall rule → switch gateway to DinD → rule preserved → `migrate` → private daemon, docker fully works |
 
 ### Bugs found and fixed during testing
