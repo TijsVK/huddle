@@ -93,7 +93,13 @@ the filtering socket-proxy.
 - [x] Removed orphaned credentials endpoint (noot fully retired)
 - [x] Commit incrementally; pushed to TijsVK fork
 
-## STATUS: core complete. 212 gateway tests green; gateway+cli typecheck; Angular build passes; 11/11 tool-compat tests pass.
+## STATUS: core complete + FULL E2E PASS.
+212 gateway tests green; gateway+cli typecheck; Angular build passes; 11/11
+tool-compat tests pass; and the full real-gateway Aspire+SqlServer E2E passes
+(rc=0): huddle init (DinD) → real devcontainer → Aspire AppHost w/ SqlServer →
+container Running → `SELECT @@VERSION` returns SQL Server 2022; no #12/#61 errors.
+Two prod bugs found+fixed by the E2E: gateway crash on malformed proxied path;
+sidecar dockerd CA trust for image pulls.
 
 ### Possible follow-ups (not blocking)
 - Auto-inject proxy env into raw-API nested containers (Aspire DCP) — currently
