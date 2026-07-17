@@ -25,6 +25,7 @@
 // automatisch goed staat.
 
 import { dockerRequest } from './docker';
+import { getCaCertPem } from './tls-ca';
 
 const DIND_IMAGE = process.env.HUDDLE_DIND_IMAGE ?? 'docker:28-dind';
 
@@ -126,8 +127,17 @@ export async function createDindSidecar(
   // dan als unhealthy en start geen containers). We chmod'en de socket daarom naar
   // 0666 zodra hij bestaat. Dat is veilig: de socket leeft in een volume die
   // ALLEEN deze devcontainer en zijn sidecar mounten — de beoogde client.
+  // Huddle MITM't uitgaande HTTPS met zijn eigen CA. De daemon trekt images via
+  // die proxy (HTTPS_PROXY), dus dockerd moet de Huddle-CA vertrouwen — anders
+  // faalt elke pull met "x509: certificate signed by unknown authority". Installeer
+  // de CA in de sidecar's trust store VOORDAT dockerd start. (docker:dind is
+  // Alpine met update-ca-certificates.)
+  const caB64 = Buffer.from(getCaCertPem(), 'utf8').toString('base64');
   const cmd = [
     'sh', '-c',
+    `mkdir -p /usr/local/share/ca-certificates; ` +
+    `echo "$HUDDLE_CA_B64" | base64 -d > /usr/local/share/ca-certificates/huddle-ca.crt; ` +
+    `update-ca-certificates 2>/dev/null || cat /usr/local/share/ca-certificates/huddle-ca.crt >> /etc/ssl/certs/ca-certificates.crt; ` +
     `dockerd --host=unix://${DIND_SOCKET_PATH} --mtu=1400 & DPID=$!; ` +
     `i=0; while [ ! -S ${DIND_SOCKET_PATH} ] && [ $i -lt 120 ]; do sleep 0.5; i=$((i+1)); done; ` +
     `chmod 0666 ${DIND_SOCKET_PATH} 2>/dev/null || true; wait $DPID`,
@@ -138,6 +148,7 @@ export async function createDindSidecar(
     Cmd: cmd,
     Env: [
       'DOCKER_TLS_CERTDIR=',
+      `HUDDLE_CA_B64=${caB64}`,
       // dockerd's eigen pulls lopen via de proxy (de netns is internal).
       'HTTP_PROXY=http://huddle:80',
       'HTTPS_PROXY=http://huddle:80',
