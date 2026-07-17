@@ -13,7 +13,10 @@ Host used for these runs: Docker 29.x, `docker:28-dind` sidecar, `docker:28-cli`
 based test devcontainer. Tier-1 = tools on a normal network; Tier-2 (`egress`) =
 the real Huddle constraint (internal network, all egress via a forward proxy).
 
-**11 / 11 tools fully pass**, each with functional assertions.
+**All workflows below pass**, each with functional assertions. This table is
+hand-maintained; `battery.sh` regenerates a fresh combined report on a full run.
+~24 distinct dev workflows + the real-gateway Aspire+SqlServer E2E; 6 bugs found
+and fixed along the way (listed below).
 
 | Tool | Result | What was proven (functional, not just "started") |
 |------|--------|--------------------------------------------------|
