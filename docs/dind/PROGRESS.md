@@ -82,15 +82,20 @@ the filtering socket-proxy.
 - [x] CLI: HUDDLE_DIND plumbing to the gateway
 - [x] Build: gateway typecheck clean, 204 vitest pass, cli typecheck clean
 - [x] Tool-compat harness (Tier-1): compose, testcontainers, buildx, privileged, k3d, localstack ALL FULLY PASS
-- [ ] Tier-2 egress harness (`tools/egress.sh` written — RUN it)
-- [ ] Aspire deep test (`tools/aspire.sh`) — repro #12 + #61
-- [ ] More tools: act (GH Actions), skaffold/tilt, devcontainer-cli, minikube(docker), dagger
-- [ ] `run.sh` runner → `docs/dind/RESULTS.md`
-- [ ] Feature: root-for-vscode grant (time-limited + permanent) replacing noot dance
-- [ ] Feature: permanent (non-expiring) docker grant
-- [ ] Frontend: portal toggles for permanent grant + root grant
-- [ ] Docs: `docs/dind/ARCHITECTURE.md` + README notes
-- [ ] Commit incrementally; push to TijsVK fork
+- [x] Tier-2 egress harness (`tools/egress.sh`) — all pass incl. loopback-not-proxied (#12)
+- [~] Aspire deep test (`tools/aspire.sh`) — #12/#61 error-absence PASS; container-Running being finalized (needed libicu, non-invariant globalization)
+- [x] More tools: act (GH Actions) ✅, devcontainer-cli ✅, workspace bind-through ✅
+- [x] `run.sh` runner + `docs/dind/RESULTS.md`
+- [x] Feature: root-for-vscode grant (time-limited + permanent) replacing noot dance — backend + tests
+- [x] Feature: permanent (non-expiring) docker grant — backend + tests
+- [~] Frontend: portal toggles for permanent grant + root grant — delegated (subagent building)
+- [x] Docs: `docs/dind/ARCHITECTURE.md` + README notes
+- [x] Commit incrementally; push to TijsVK fork (ongoing)
+
+### Still open
+- Finalize Aspire result (RESULTS.md) once the run completes.
+- Land frontend changes from the subagent + verify Angular build.
+- Consider: remove now-unused credentials endpoint/db helper (noot fully retired).
 
 ## Smoke-test notes
 
