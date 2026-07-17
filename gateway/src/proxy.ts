@@ -196,7 +196,16 @@ export function createProxyServer(): http.Server {
       send403(res, host, 'deny', containerId);
       return;
     }
-    const forwardPath = `${normPath}${target.search}`;
+    // Node's http client throws ERR_UNESCAPED_CHARACTERS (synchronously, at
+    // http.request()) when the request path contains characters outside
+    // !-ÿ — e.g. a space or a non-latin1 char. A devcontainer (or a
+    // tool like Aspire/DCP) sending such a path must NOT be able to crash the
+    // whole gateway, so percent-encode those characters here. Already-encoded
+    // %xx sequences are ASCII and pass through untouched.
+    const forwardPath = `${normPath}${target.search}`.replace(
+      /[^!-ÿ]/g,
+      (c) => encodeURIComponent(c),
+    );
 
     let ruleId: number | null;
     if (host === 'huddle') {

@@ -13,6 +13,13 @@ import { sanitizeResolvConf, scheduleSettlingSanitize } from './dns-egress';
 // from sockets that lose their connection unexpectedly.
 process.on('uncaughtException', (err: NodeJS.ErrnoException) => {
   if (err.code === 'ECONNRESET' || err.code === 'EPIPE') return;
+  // A malformed client request (e.g. a proxied path with unescaped characters)
+  // must never crash the gateway — that would take every devcontainer's egress
+  // and Docker access down with it. Log and keep serving.
+  if (err.code === 'ERR_UNESCAPED_CHARACTERS' || err.code === 'ERR_INVALID_HTTP_TOKEN' || err.code === 'ERR_INVALID_CHAR') {
+    console.warn('[proxy] dropped malformed request:', err.code);
+    return;
+  }
   console.error('[fatal] uncaught exception:', err);
   process.exit(1);
 });
