@@ -83,19 +83,24 @@ the filtering socket-proxy.
 - [x] Build: gateway typecheck clean, 204 vitest pass, cli typecheck clean
 - [x] Tool-compat harness (Tier-1): compose, testcontainers, buildx, privileged, k3d, localstack ALL FULLY PASS
 - [x] Tier-2 egress harness (`tools/egress.sh`) — all pass incl. loopback-not-proxied (#12)
-- [~] Aspire deep test (`tools/aspire.sh`) — #12/#61 error-absence PASS; container-Running being finalized (needed libicu, non-invariant globalization)
+- [x] Aspire deep test (`tools/aspire.sh`) — ALL PASS: DCP container Running, no #12 403/CopyFile, no #61 ownership error (needed libicu + socket chmod 0666 for the non-root user)
 - [x] More tools: act (GH Actions) ✅, devcontainer-cli ✅, workspace bind-through ✅
-- [x] `run.sh` runner + `docs/dind/RESULTS.md`
-- [x] Feature: root-for-vscode grant (time-limited + permanent) replacing noot dance — backend + tests
-- [x] Feature: permanent (non-expiring) docker grant — backend + tests
-- [~] Frontend: portal toggles for permanent grant + root grant — delegated (subagent building)
+- [x] `run.sh` runner + `docs/dind/RESULTS.md` — 11/11 tools green
+- [x] Feature: root-for-vscode grant (time-limited + permanent) replacing noot dance — backend + frontend + tests
+- [x] Feature: permanent (non-expiring) docker grant — backend + frontend + tests
+- [x] Frontend: portal toggles for permanent grant + root grant — Angular build passes
 - [x] Docs: `docs/dind/ARCHITECTURE.md` + README notes
-- [x] Commit incrementally; push to TijsVK fork (ongoing)
+- [x] Removed orphaned credentials endpoint (noot fully retired)
+- [x] Commit incrementally; pushed to TijsVK fork
 
-### Still open
-- Finalize Aspire result (RESULTS.md) once the run completes.
-- Land frontend changes from the subagent + verify Angular build.
-- Consider: remove now-unused credentials endpoint/db helper (noot fully retired).
+## STATUS: core complete. 212 gateway tests green; gateway+cli typecheck; Angular build passes; 11/11 tool-compat tests pass.
+
+### Possible follow-ups (not blocking)
+- Auto-inject proxy env into raw-API nested containers (Aspire DCP) — currently
+  confined by internal net but not auto-proxied. Would need a daemon-side shim.
+- Broaden workspace bridging beyond workspace+folder-mappings if a tool needs
+  arbitrary devcontainer-local bind sources.
+- More tools if desired: skaffold/tilt, dagger, minikube(docker), earthly.
 
 ## Smoke-test notes
 
