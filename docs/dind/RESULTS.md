@@ -47,6 +47,8 @@ and fixed along the way (listed below).
 | kind | ✅ pass | kubeadm node + systemd-in-container, `kind load docker-image`, pod from sideloaded image Ready |
 | toolchain: pip | ✅ pass | `pip install` through the MITM (PIP_CERT fix — pip's certifi bundle) |
 | toolchain: maven/JVM | ✅ pass | reaches Maven Central through the MITM, JVM trusts the CA (no TLS error) via ca-certificates-java |
+| **in-place update** | ✅ pass | rule + grant + action-policy + settings + folder-mapping + devcontainer all survive a gateway update (re-init, same volume/token); docker access restored + enforcing |
+| **workspace changes** | ✅ pass | worktree idempotent: cloned repo + committed/uncommitted/untracked changes survive migrate/recreate (unit test) |
 | **migration** classic→DinD | ✅ pass | classic devcontainer + firewall rule → switch gateway to DinD → rule preserved → `migrate` → private daemon, docker fully works |
 
 ### Bugs found and fixed during testing
