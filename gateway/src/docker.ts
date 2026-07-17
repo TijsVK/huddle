@@ -506,7 +506,7 @@ if [ -n "$HUDDLE_IP" ]; then
   for _h in /root /home/vscode; do
     mkdir -p "$_h/.docker"
     cat > "$_h/.docker/config.json" <<EOF
-{"proxies":{"default":{"httpProxy":"http://$HUDDLE_IP:80","httpsProxy":"http://$HUDDLE_IP:80","noProxy":"localhost,127.0.0.1,::1,[::1]"}}}
+{"proxies":{"default":{"httpProxy":"http://$HUDDLE_IP:80","httpsProxy":"http://$HUDDLE_IP:80","noProxy":"localhost,127.0.0.1,::1,[::1],host.docker.internal"}}}
 EOF
   done
   chown -R vscode:vscode /home/vscode/.docker 2>/dev/null || true
@@ -949,8 +949,8 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
     // zelf niet bereiken. De bracketed vorm `[::1]` staat er expliciet bij
     // omdat .NET/Aspire's DCP zijn targets als `http://[::1]:<port>` adresseert
     // en NO_PROXY letterlijk tegen die bracketed host matcht (issue #12).
-    'no_proxy=localhost,127.0.0.1,::1,[::1]',
-    'NO_PROXY=localhost,127.0.0.1,::1,[::1]',
+    'no_proxy=localhost,127.0.0.1,::1,[::1],host.docker.internal',
+    'NO_PROXY=localhost,127.0.0.1,::1,[::1],host.docker.internal',
     // CA-trust op container-niveau zodat ELK proces de MITM-CA vertrouwt — niet
     // alleen login-shells die /etc/profile.d sourcen. Zonder dit valideren tools
     // die door de IDE/non-login-shell gestart worden tegen hun eigen bundle,
@@ -973,7 +973,7 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
     ...(isVscode ? [] : [
       'DEVCONTAINER_CONFIG_PATH=/.jbdevcontainer/config/JetBrains/host-config.json',
       'XDG_DATA_HOME=/.jbdevcontainer/data',
-      'JAVA_TOOL_OPTIONS=-Dhttp.proxyHost=huddle -Dhttp.proxyPort=80 -Dhttps.proxyHost=huddle -Dhttps.proxyPort=80 -Dhttp.nonProxyHosts=localhost|127.*|[::1]',
+      'JAVA_TOOL_OPTIONS=-Dhttp.proxyHost=huddle -Dhttp.proxyPort=80 -Dhttps.proxyHost=huddle -Dhttps.proxyPort=80 -Dhttp.nonProxyHosts=localhost|127.*|[::1]|host.docker.internal',
     ]),
   ];
 

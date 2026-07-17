@@ -30,8 +30,8 @@ services:
       HTTPS_PROXY: http://huddle:80
       http_proxy: http://huddle:80
       https_proxy: http://huddle:80
-      NO_PROXY: localhost,127.0.0.1,::1,[::1],huddle
-      no_proxy: localhost,127.0.0.1,::1,[::1],huddle
+      NO_PROXY: localhost,127.0.0.1,::1,[::1],huddle,host.docker.internal
+      no_proxy: localhost,127.0.0.1,::1,[::1],huddle,host.docker.internal
       # Vertrouw de Huddle-MITM-CA zonder root: postCreateCommand haalt hem hierheen.
       # Ontbreekt het bestand nog, dan valt Node terug op zijn eigen CA-bundle.
       NODE_EXTRA_CA_CERTS: /home/node/.huddle-ca.crt

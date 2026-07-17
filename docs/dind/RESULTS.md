@@ -48,6 +48,7 @@ and fixed along the way (listed below).
 | toolchain: pip | ✅ pass | `pip install` through the MITM (PIP_CERT fix — pip's certifi bundle) |
 | toolchain: maven/JVM | ✅ pass | reaches Maven Central through the MITM, JVM trusts the CA (no TLS error) via ca-certificates-java |
 | **in-place update** | ✅ pass | rule + grant + action-policy + settings + folder-mapping + devcontainer all survive a gateway update (re-init, same volume/token); docker access restored + enforcing |
+| **Aspire dashboard gRPC** | ✅ pass | `host.docker.internal` now bypasses the proxy → container-telemetry gRPC goes direct, not through Huddle's HTTP/1 proxy |
 | **workspace changes** | ✅ pass | worktree idempotent: cloned repo + committed/uncommitted/untracked changes survive migrate/recreate (unit test) |
 | **migration** classic→DinD | ✅ pass | classic devcontainer + firewall rule → switch gateway to DinD → rule preserved → `migrate` → private daemon, docker fully works |
 
@@ -57,6 +58,8 @@ and fixed along the way (listed below).
 3. Sidecar dockerd didn't trust the Huddle MITM CA → image pulls failed `x509: unknown authority`.
 4. `sudo` reset the environment → `sudo apt-get`/pip had no proxy/CA → no network.
 5. cgroup-v2 controllers not delegated (bypassed `dockerd-entrypoint.sh`) → nested `--memory`/`--cpus` not enforced.
+6. pip ignored the system CA (own certifi bundle) → `pip install` failed through the MITM (fixed with `PIP_CERT`).
+7. `host.docker.internal` was not in `no_proxy` → Aspire container-telemetry gRPC (h2c) routed through the HTTP/1 proxy → **gRPC errors on the dashboard**. Now bypassed everywhere Huddle sets proxy env (+ Java nonProxyHosts).
 
 ## Full end-to-end (real gateway, not the harness stand-in)
 

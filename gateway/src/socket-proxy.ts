@@ -468,8 +468,8 @@ export async function createContainerProxy(containerName: string, socketDir: str
           'HTTPS_PROXY=http://huddle:80',
           // Loopback nooit via de proxy; `[::1]` bracketed voor .NET/Aspire
           // (zie de toelichting bij dezelfde regels in docker.ts).
-          'no_proxy=localhost,127.0.0.1,::1,[::1]',
-          'NO_PROXY=localhost,127.0.0.1,::1,[::1]',
+          'no_proxy=localhost,127.0.0.1,::1,[::1],host.docker.internal',
+          'NO_PROXY=localhost,127.0.0.1,::1,[::1],host.docker.internal',
           'NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/huddle-ca.crt',
           'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt',
           'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt',

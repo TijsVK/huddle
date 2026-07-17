@@ -166,8 +166,8 @@ export async function createDindSidecar(
       'HTTPS_PROXY=http://huddle:80',
       'http_proxy=http://huddle:80',
       'https_proxy=http://huddle:80',
-      'NO_PROXY=localhost,127.0.0.1,::1,[::1],huddle',
-      'no_proxy=localhost,127.0.0.1,::1,[::1],huddle',
+      'NO_PROXY=localhost,127.0.0.1,::1,[::1],huddle,host.docker.internal',
+      'no_proxy=localhost,127.0.0.1,::1,[::1],huddle,host.docker.internal',
     ],
     Labels: {
       'huddle.parent': containerName,

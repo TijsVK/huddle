@@ -16,14 +16,14 @@ HARNESS=(compose testcontainers buildx privileged k3d localstack act devcontaine
          workspace isolation kafka compose-build registry resources multidb rabbitmq \
          webdev playwright helm kind egress)
 # Real-gateway E2Es (spin up the actual huddle gateway; must run serially).
-E2E=(e2e-aspire-sqlserver e2e-nested-egress e2e-toolchain-ca e2e-restart e2e-migrate e2e-upgrade)
+E2E=(e2e-aspire-sqlserver e2e-nested-egress e2e-toolchain-ca e2e-restart e2e-migrate e2e-upgrade e2e-grpc-noproxy)
 
 declare -A BUDGET=(
   [compose]=300 [testcontainers]=420 [buildx]=300 [privileged]=300 [k3d]=600
   [localstack]=420 [act]=420 [devcontainer-cli]=600 [workspace]=200 [isolation]=300
   [kafka]=700 [compose-build]=300 [registry]=400 [resources]=250 [multidb]=600
   [rabbitmq]=420 [webdev]=420 [playwright]=700 [helm]=600 [kind]=700 [egress]=500
-  [e2e-aspire-sqlserver]=1500 [e2e-nested-egress]=700 [e2e-toolchain-ca]=1200 [e2e-restart]=900 [e2e-migrate]=900 [e2e-upgrade]=900
+  [e2e-aspire-sqlserver]=1500 [e2e-nested-egress]=700 [e2e-toolchain-ca]=1200 [e2e-restart]=900 [e2e-migrate]=900 [e2e-upgrade]=900 [e2e-grpc-noproxy]=500
 )
 
 SEL=("$@")
