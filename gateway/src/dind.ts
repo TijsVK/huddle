@@ -1,0 +1,198 @@
+// ── Docker-in-Docker sidecar (experiment: broad dev-tool compatibility) ──────
+//
+// Model N (zie docs/dind/PROGRESS.md): elke devcontainer krijgt zijn EIGEN echte
+// Docker-daemon via een `dind-<naam>` sidecar die de NETWERK-namespace van de
+// devcontainer deelt (`--network container:<devcontainer>`). De devcontainer
+// praat met die private daemon via een gedeelde socket-volume; er is geen
+// filterende socket-proxy meer in het pad.
+//
+// Waarom dit tools als .NET Aspire repareert (issues #12/#61):
+//   - Aspire's DCP inspecteert/maakt containers en netwerken ongefilterd — een
+//     echte daemon kent geen "container not owned by this devcontainer".
+//   - Gepubliceerde poorten landen op de LOOPBACK van de devcontainer
+//     (localhost / [::1]) doordat de daemon de netns van de devcontainer deelt —
+//     precies wat DCP verwacht (het adresseert targets als http://[::1]:<port>).
+//   - `docker CopyFile`/archive, port-publish, health-check-inspects: allemaal
+//     rechtstreeks op de private daemon, dus geen 403/`__PORT_CHECK__`/hangs.
+//
+// Isolatie: de private daemon ziet de host-daemon NIET en ook geen peer-
+// devcontainers. Alleen de sidecar is privileged en heeft geen host-mounts.
+//
+// Egress: de sidecar én elke geneste container delen de (firewalled) netns van
+// de devcontainer — dc-net-<naam> is `--internal`, dus de enige uitweg is de
+// Huddle-proxy op huddle:80. We injecteren bovendien proxy-env in elke geneste
+// container via de docker-client-config (proxies.default), zodat http(s)_proxy
+// automatisch goed staat.
+
+import { dockerRequest } from './docker';
+
+const DIND_IMAGE = process.env.HUDDLE_DIND_IMAGE ?? 'docker:28-dind';
+
+// Pad (in de gedeelde volume) waar de private daemon zijn unix-socket neerzet.
+// Zowel de sidecar als de devcontainer mounten deze volume op /var/run/dind.
+export const DIND_SOCKET_MOUNT = '/var/run/dind';
+export const DIND_SOCKET_PATH = `${DIND_SOCKET_MOUNT}/docker.sock`;
+export const DIND_DOCKER_HOST = `unix://${DIND_SOCKET_PATH}`;
+
+export function dindSockVolume(containerName: string): string {
+  return `huddle-dind-sock-${containerName}`;
+}
+export function dindDataVolume(containerName: string): string {
+  return `huddle-dind-data-${containerName}`;
+}
+export function dindContainerName(containerName: string): string {
+  return `dind-${containerName}`;
+}
+
+// Pull het dind-image als het lokaal ontbreekt. De pull-response is een stroom
+// JSON-regels; dockerRequest wacht op 'end' (pull klaar) en negeert het niet-
+// JSON-resultaat. Loopt via de host-daemon van de gateway (niet de proxy).
+async function ensureImage(image: string): Promise<void> {
+  try {
+    await dockerRequest('GET', `/images/${encodeURIComponent(image)}/json`);
+    return;
+  } catch {}
+  // Splits repo:tag alleen op een `:` ná de laatste `/` (zodat registry:port
+  // intact blijft). Geen tag → latest.
+  const lastSlash = image.lastIndexOf('/');
+  const colon = image.indexOf(':', lastSlash + 1);
+  const repo = colon === -1 ? image : image.slice(0, colon);
+  const tag = colon === -1 ? 'latest' : image.slice(colon + 1);
+  console.log(`[dind] pulling ${image} ...`);
+  await dockerRequest('POST', `/images/create?fromImage=${encodeURIComponent(repo)}&tag=${encodeURIComponent(tag)}`);
+  console.log(`[dind] pulled ${image}`);
+}
+
+async function ensureVolume(name: string, parent: string): Promise<void> {
+  try {
+    await dockerRequest('GET', `/volumes/${encodeURIComponent(name)}`);
+  } catch {
+    await dockerRequest('POST', '/volumes/create', {
+      Name: name,
+      Labels: { 'huddle.parent': parent, 'huddle.role': 'dind' },
+    });
+  }
+}
+
+// De gedeelde socket-volume moet bestaan vóór de devcontainer start (die mount
+// hem op /var/run/dind). Aangeroepen vanuit createAndStartContainer.
+export async function ensureDindSockVolume(containerName: string): Promise<void> {
+  await ensureVolume(dindSockVolume(containerName), containerName);
+}
+
+// De docker-client-config die we in de sidecar zetten zodat élke geneste
+// `docker run`/compose/build proxy-env erft (egress via de Huddle-proxy).
+function proxyClientConfig(): string {
+  return JSON.stringify({
+    proxies: {
+      default: {
+        httpProxy: 'http://huddle:80',
+        httpsProxy: 'http://huddle:80',
+        noProxy: 'localhost,127.0.0.1,::1,[::1],huddle',
+      },
+    },
+  });
+}
+
+// Maak (of herstart) de DinD-sidecar voor een devcontainer. De devcontainer moet
+// al draaien: de sidecar deelt zijn netwerk-namespace via container:<id>.
+export async function createDindSidecar(containerName: string, devcontainerId: string): Promise<string> {
+  const name = dindContainerName(containerName);
+
+  // Bestaande sidecar opruimen (herstart-scenario / re-create).
+  try { await dockerRequest('DELETE', `/containers/${encodeURIComponent(name)}?force=true`); } catch {}
+
+  await ensureImage(DIND_IMAGE);
+  await ensureDindSockVolume(containerName);
+  await ensureVolume(dindDataVolume(containerName), containerName);
+
+  // dockerd luistert op de unix-socket in de gedeelde volume. TLS uit
+  // (DOCKER_TLS_CERTDIR leeg): het pad loopt over een unix-socket in een
+  // volume die alleen de devcontainer en de sidecar delen, niet over TCP.
+  const cmd = [
+    'dockerd',
+    `--host=unix://${DIND_SOCKET_PATH}`,
+    // Kleinere MTU zodat verkeer door de Huddle-proxy/overlay past (zelfde
+    // reden als processNetworkCreate in socket-proxy.ts).
+    '--mtu=1400',
+  ];
+
+  const createBody = {
+    Image: DIND_IMAGE,
+    Cmd: cmd,
+    Env: [
+      'DOCKER_TLS_CERTDIR=',
+      // dockerd's eigen pulls lopen via de proxy (de netns is internal).
+      'HTTP_PROXY=http://huddle:80',
+      'HTTPS_PROXY=http://huddle:80',
+      'http_proxy=http://huddle:80',
+      'https_proxy=http://huddle:80',
+      'NO_PROXY=localhost,127.0.0.1,::1,[::1],huddle',
+      'no_proxy=localhost,127.0.0.1,::1,[::1],huddle',
+    ],
+    Labels: {
+      'huddle.parent': containerName,
+      'huddle.role': 'dind',
+    },
+    HostConfig: {
+      // Deel de netwerk-namespace van de devcontainer: gepubliceerde poorten
+      // landen op diens loopback, en alle egress erft diens firewall-iptables.
+      NetworkMode: `container:${devcontainerId}`,
+      Privileged: true,
+      Mounts: [
+        { Type: 'volume', Source: dindSockVolume(containerName), Target: DIND_SOCKET_MOUNT },
+        { Type: 'volume', Source: dindDataVolume(containerName), Target: '/var/lib/docker' },
+      ],
+      // Overleeft een Huddle-herstart: de devcontainer (en dus de netns) blijft
+      // bestaan, dus de sidecar kan gewoon weer opstarten.
+      RestartPolicy: { Name: 'unless-stopped' },
+    },
+  };
+
+  const created = await dockerRequest(
+    'POST',
+    `/containers/create?name=${encodeURIComponent(name)}`,
+    createBody,
+  );
+  const id: string = created.Id;
+  await dockerRequest('POST', `/containers/${id}/start`, {});
+
+  // Proxy-client-config in de sidecar zetten zodat geneste containers proxy-env
+  // erven. Via exec omdat het na de daemon-start moet (root in de sidecar).
+  try {
+    const cfg = proxyClientConfig().replace(/'/g, `'\\''`);
+    const script = `mkdir -p /root/.docker && printf '%s' '${cfg}' > /root/.docker/config.json`;
+    const exec = await dockerRequest('POST', `/containers/${id}/exec`, {
+      User: 'root', Cmd: ['sh', '-c', script], AttachStdout: false, AttachStderr: false,
+    });
+    await dockerRequest('POST', `/exec/${exec.Id}/start`, { Detach: true });
+  } catch (err: any) {
+    console.warn(`[dind] proxy client-config for ${name} failed:`, err.message);
+  }
+
+  console.log(`[dind] sidecar ${name} started (netns of ${containerName})`);
+  return id;
+}
+
+// Sidecar + zijn volumes verwijderen wanneer de devcontainer wordt opgeruimd.
+export async function removeDindSidecar(containerName: string): Promise<void> {
+  const name = dindContainerName(containerName);
+  try { await dockerRequest('DELETE', `/containers/${encodeURIComponent(name)}?force=true`); } catch {}
+  for (const vol of [dindSockVolume(containerName), dindDataVolume(containerName)]) {
+    try { await dockerRequest('DELETE', `/volumes/${encodeURIComponent(vol)}?force=true`); } catch {}
+  }
+}
+
+// Bij Huddle-herstart: zorg dat de sidecar draait voor een bestaande
+// devcontainer (start indien gestopt, maak opnieuw indien weg).
+export async function ensureDindSidecar(containerName: string, devcontainerId: string): Promise<void> {
+  const name = dindContainerName(containerName);
+  try {
+    const info = await dockerRequest('GET', `/containers/${encodeURIComponent(name)}/json`);
+    if (info?.State?.Running) return;
+    await dockerRequest('POST', `/containers/${encodeURIComponent(name)}/start`, {});
+    console.log(`[dind] sidecar ${name} restarted`);
+  } catch {
+    await createDindSidecar(containerName, devcontainerId);
+  }
+}

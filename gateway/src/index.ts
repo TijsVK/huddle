@@ -1,8 +1,9 @@
 import { initDb } from './db';
 import { createProxyServer } from './proxy';
 import { createApiServer } from './api';
-import { listDevcontainers, networkExists, connectNetwork, refreshContainerIptables } from './docker';
+import { listDevcontainers, networkExists, connectNetwork, refreshContainerIptables, DIND_ENABLED } from './docker';
 import { createContainerProxy } from './socket-proxy';
+import { ensureDindSidecar } from './dind';
 import { initCa } from './tls-ca';
 import { sanitizeResolvConf, scheduleSettlingSanitize } from './dns-egress';
 
@@ -25,18 +26,28 @@ createApiServer().catch(err => {
   process.exit(1);
 });
 
-// Re-create proxy sockets for all existing devcontainers (survives huddle restart)
+// Re-create proxy sockets for all existing devcontainers (survives huddle restart).
+// In DinD-modus is er geen socket-proxy; dan herstellen we de private-daemon-
+// sidecars i.p.v. de proxy-sockets.
 async function initContainerProxies(): Promise<void> {
   try {
     const containers = await listDevcontainers();
     for (const c of containers) {
-      await createContainerProxy(c.name, SOCKET_DIR);
+      if (DIND_ENABLED) {
+        await ensureDindSidecar(c.name, c.id);
+      } else {
+        await createContainerProxy(c.name, SOCKET_DIR);
+      }
     }
     if (containers.length) {
-      console.log(`[socket-proxy] restored ${containers.length} proxy socket(s)`);
+      console.log(
+        DIND_ENABLED
+          ? `[dind] restored ${containers.length} private-daemon sidecar(s)`
+          : `[socket-proxy] restored ${containers.length} proxy socket(s)`,
+      );
     }
   } catch (err: any) {
-    console.error('[socket-proxy] init failed:', err.message);
+    console.error('[init] container docker-access restore failed:', err.message);
   }
 }
 

@@ -2,6 +2,15 @@ import http from 'http';
 import fs from 'fs';
 import crypto from 'crypto';
 import { createContainerProxy } from './socket-proxy';
+import {
+  createDindSidecar,
+  ensureDindSockVolume,
+  removeDindSidecar,
+  dindSockVolume,
+  DIND_SOCKET_MOUNT,
+  DIND_DOCKER_HOST,
+  DIND_SOCKET_PATH,
+} from './dind';
 import { saveCredentials, getSetting, listFolderMappings } from './db';
 import { getCaCertPem } from './tls-ca';
 import { ensureWorktree } from './worktree';
@@ -16,6 +25,12 @@ const SOCKET_DIR = '/tmp/dc-sockets';
 // (Docker/Docker Desktop hebben dit niet nodig.)
 const CONTAINER_RUNTIME = process.env.HUDDLE_RUNTIME ?? 'docker';
 const RUNTIME_SECURITY_OPT: string[] = CONTAINER_RUNTIME === 'podman' ? ['label=disable'] : [];
+
+// Experiment: Docker-in-Docker. Als HUDDLE_DIND=1 krijgt elke devcontainer een
+// EIGEN private Docker-daemon (dind-sidecar, zie dind.ts) i.p.v. de filterende
+// socket-proxy. Dat maakt veeleisende tools (bv. .NET Aspire) out-of-the-box
+// werkend. Standaard uit → klassiek socket-proxy-model.
+export const DIND_ENABLED = process.env.HUDDLE_DIND === '1';
 
 // ── IP → container name cache (used by proxy) ────────────────────────────────
 
@@ -390,6 +405,9 @@ export async function startExistingContainer(containerId: string): Promise<void>
 }
 
 export async function cleanupContainerNetwork(containerName: string): Promise<void> {
+  // DinD: ruim de private-daemon-sidecar + zijn volumes op. Idempotent en
+  // veilig in beide modi (in klassiek bestaat de sidecar niet → 404 geslikt).
+  await removeDindSidecar(containerName);
   const netName = `dc-net-${containerName}`;
   if (!(await networkExists(netName))) return;
   try { await disconnectNetwork(netName, 'huddle'); } catch {}
@@ -423,12 +441,16 @@ for pair in ${pairs}; do
 done`;
 }
 
-// Docker-toegang loopt via de socket in de gemounte directory /var/run/huddle
-// (zie DOCKER_HOST). Symlink het defaultpad voor tools die DOCKER_HOST negeren.
-// Gedeeld tussen het JetBrains- en het VS Code-startscript.
-const DOCKER_SOCK_SYMLINK = `# Docker-toegang loopt via de socket in de gemounte directory /var/run/huddle
-# (zie DOCKER_HOST). Symlink het defaultpad voor tools die DOCKER_HOST negeren.
-ln -sfn /var/run/huddle/docker.sock /var/run/docker.sock 2>/dev/null || true`;
+// Docker-toegang loopt via een gemounte socket (zie DOCKER_HOST). Symlink het
+// defaultpad /var/run/docker.sock ernaartoe voor tools die DOCKER_HOST negeren.
+// Het bronpad verschilt per model: klassiek de socket-proxy in /var/run/huddle,
+// in DinD-modus de private-daemon-socket in /var/run/dind. Gedeeld tussen het
+// JetBrains- en het VS Code-startscript.
+function dockerSockSymlink(sockPath: string): string {
+  return `# Docker-toegang loopt via ${sockPath} (zie DOCKER_HOST). Symlink het
+# defaultpad voor tools die DOCKER_HOST negeren.
+ln -sfn ${sockPath} /var/run/docker.sock 2>/dev/null || true`;
+}
 
 // Finding #15 (IDE-kanaal, VS Code Remote + JetBrains Gateway): het attach-kanaal
 // loopt over `docker exec`/stdio en wordt door NOCH de egress-proxy NOCH de
@@ -488,7 +510,7 @@ fi`;
 
 // ── jb-config.sh — same logic as devcontainer-manager.ps1 ───────────────────
 
-function buildJbConfigScript(containerWorkspace: string, containerName: string, ideName: IdeName, password: string, caCertPem: string, seedScript: string): string {
+function buildJbConfigScript(containerWorkspace: string, containerName: string, ideName: IdeName, password: string, caCertPem: string, seedScript: string, dockerSockPath: string): string {
   const ideFilter = ideName === 'rider' ? 'rider' : 'idea';
   const caB64 = Buffer.from(caCertPem, 'utf8').toString('base64');
   return `#!/bin/sh
@@ -532,7 +554,7 @@ fi
 CURL_LINE='--proxy-header "X-Container-ID: ${containerName}"'
 grep -qF "$CURL_LINE" /home/vscode/.curlrc 2>/dev/null || echo "$CURL_LINE" >> /home/vscode/.curlrc
 
-${DOCKER_SOCK_SYMLINK}
+${dockerSockSymlink(dockerSockPath)}
 
 HUDDLE_IP=$(getent hosts huddle | awk '{print $1}')
 iptables -t nat -C OUTPUT -p tcp --dport 80 ! -d "$HUDDLE_IP" -j DNAT --to-destination "$HUDDLE_IP:80" 2>/dev/null || \\
@@ -652,14 +674,14 @@ export function buildVscodeMachineSettings(): Record<string, unknown> {
   };
 }
 
-function buildVscodeConfigScript(containerWorkspace: string, containerName: string, password: string, caCertPem: string, seedScript: string): string {
+function buildVscodeConfigScript(containerWorkspace: string, containerName: string, password: string, caCertPem: string, seedScript: string, dockerSockPath: string): string {
   const caB64 = Buffer.from(caCertPem, 'utf8').toString('base64');
   const settingsB64 = Buffer.from(JSON.stringify(buildVscodeMachineSettings(), null, 2), 'utf8').toString('base64');
   return `#!/bin/sh
 CURL_LINE='--proxy-header "X-Container-ID: ${containerName}"'
 grep -qF "$CURL_LINE" /home/vscode/.curlrc 2>/dev/null || echo "$CURL_LINE" >> /home/vscode/.curlrc
 
-${DOCKER_SOCK_SYMLINK}
+${dockerSockSymlink(dockerSockPath)}
 
 HUDDLE_IP=$(getent hosts huddle | awk '{print $1}')
 iptables -t nat -C OUTPUT -p tcp --dport 80 ! -d "$HUDDLE_IP" -j DNAT --to-destination "$HUDDLE_IP:80" 2>/dev/null || \\
@@ -827,8 +849,16 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
     console.log(`[huddle] Base image '${imageName}' built successfully`);
   }
 
-  // Create per-container Docker socket proxy (injects X-Container-Id for OPA policy)
-  await createContainerProxy(containerName, SOCKET_DIR);
+  // Docker-toegang voor de devcontainer:
+  //   klassiek → per-container filterende socket-proxy (label-policy, grants).
+  //   DinD     → een EIGEN private daemon (dind-sidecar). Dan is er geen proxy;
+  //              de gedeelde socket-volume moet wel bestaan vóór de start (die
+  //              mount hem op /var/run/dind).
+  if (DIND_ENABLED) {
+    await ensureDindSockVolume(containerName);
+  } else {
+    await createContainerProxy(containerName, SOCKET_DIR);
+  }
 
   // JB-specifieke env (host-config pad, JBR/RemoteDev data, java-proxy) slaan we
   // over voor VS Code; de proxy- en user-env blijven gelijk.
@@ -858,11 +888,11 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
     'NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/huddle-ca.crt',
     'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt',
     'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt',
-    // De docker-proxy-socket zit in de gemounte directory /var/run/huddle (zie
-    // Mounts). DOCKER_HOST laat docker/compose/SDK's hem daar vinden; voor tools
-    // die het defaultpad hardcoden legt het config-script ook een symlink op
-    // /var/run/docker.sock.
-    'DOCKER_HOST=unix:///var/run/huddle/docker.sock',
+    // DOCKER_HOST wijst naar de docker-socket. Klassiek: de socket-proxy in de
+    // gemounte directory /var/run/huddle. DinD: de private-daemon-socket in de
+    // gedeelde volume /var/run/dind. Het config-script legt in beide gevallen ook
+    // een symlink op /var/run/docker.sock voor tools die het defaultpad hardcoden.
+    `DOCKER_HOST=${DIND_ENABLED ? DIND_DOCKER_HOST : 'unix:///var/run/huddle/docker.sock'}`,
     ...(isVscode ? [] : [
       'DEVCONTAINER_CONFIG_PATH=/.jbdevcontainer/config/JetBrains/host-config.json',
       'XDG_DATA_HOME=/.jbdevcontainer/data',
@@ -887,16 +917,24 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
       Source: effectiveSource,
       Target: containerWorkspace,
     }]),
-    {
-      // Mount de per-container socket-DIRECTORY, niet het socket-bestand zelf:
-      // een file-bind pint de inode en wijst na een huddle-herstart (unlink +
-      // nieuwe socket) voorgoed naar de dode oude socket. Via de directory ziet
-      // de container altijd de actuele socket; DOCKER_HOST (env) en de symlink
-      // /var/run/docker.sock (config-script) wijzen ernaar.
-      Type: 'bind',
-      Source: `${SOCKET_DIR}/${containerName}`,
-      Target: '/var/run/huddle',
-    },
+    ...(DIND_ENABLED
+      ? [{
+          // DinD: de private-daemon-socket komt uit de gedeelde volume die ook
+          // de dind-sidecar mount. De sidecar (dind.ts) zet dockerd's socket op
+          // ${DIND_SOCKET_PATH}.
+          Type: 'volume' as const,
+          Source: dindSockVolume(containerName),
+          Target: DIND_SOCKET_MOUNT,
+        }]
+      : [{
+          // Klassiek: mount de per-container socket-DIRECTORY, niet het socket-
+          // bestand zelf: een file-bind pint de inode en wijst na een huddle-
+          // herstart (unlink + nieuwe socket) voorgoed naar de dode oude socket.
+          // Via de directory ziet de container altijd de actuele socket.
+          Type: 'bind' as const,
+          Source: `${SOCKET_DIR}/${containerName}`,
+          Target: '/var/run/huddle',
+        }]),
   ];
 
   const createBody = {
@@ -928,13 +966,26 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
   const id: string = created.Id;
   await dockerRequest('POST', `/containers/${id}/start`, {});
 
+  // DinD: start de private-daemon-sidecar die de netns van deze (nu draaiende)
+  // devcontainer deelt. Vóór het config-script zodat dockerd zijn netwerk-
+  // iptables kan opzetten voordat het script de egress-DNAT/DROP-regels toevoegt.
+  if (DIND_ENABLED) {
+    try {
+      await createDindSidecar(containerName, id);
+    } catch (err: any) {
+      console.error(`[dind] sidecar for ${containerName} failed to start:`, err.message);
+    }
+  }
+
   const containerPaths = folderMounts.map(m => m.Target);
   const seedScript = buildFolderMappingSeedScript(containerPaths);
 
+  const dockerSockPath = DIND_ENABLED ? DIND_SOCKET_PATH : '/var/run/huddle/docker.sock';
+
   // Run config script via exec — VS Code-variant zonder JB host-config/backend.
   const script = isVscode
-    ? buildVscodeConfigScript(containerWorkspace, containerName, password, getCaCertPem(), seedScript)
-    : buildJbConfigScript(containerWorkspace, containerName, ideName, password, getCaCertPem(), seedScript);
+    ? buildVscodeConfigScript(containerWorkspace, containerName, password, getCaCertPem(), seedScript, dockerSockPath)
+    : buildJbConfigScript(containerWorkspace, containerName, ideName, password, getCaCertPem(), seedScript, dockerSockPath);
   const execCreate = await dockerRequest('POST', `/containers/${id}/exec`, {
     User: 'root',
     Cmd: ['sh', '-c', script],

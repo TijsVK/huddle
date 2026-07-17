@@ -120,6 +120,23 @@ export async function runInit(opts: InitOptions, images: ResolvedImages): Promis
   // SELinux-labeled proxy socket.
   const securityOptFlags = runtime.securityOpts.map((opt) => ` --security-opt ${opt}`).join('');
 
+  // Experiment: Docker-in-Docker. Met HUDDLE_DIND=1 geeft de gateway elke
+  // devcontainer een eigen private Docker-daemon (dind-sidecar) i.p.v. de
+  // filterende socket-proxy — voor brede compatibiliteit met tools die de proxy
+  // vandaag breekt (Aspire, Testcontainers, kind/k3d, ...). Zie docs/dind/.
+  const dindEnabled = process.env.HUDDLE_DIND === '1';
+  let dindFlags = '';
+  if (dindEnabled) {
+    dindFlags += ' -e HUDDLE_DIND=1';
+    if (process.env.HUDDLE_DIND_IMAGE) dindFlags += ` -e HUDDLE_DIND_IMAGE=${process.env.HUDDLE_DIND_IMAGE}`;
+    console.log(yellow('Docker-in-Docker mode active (HUDDLE_DIND=1): each devcontainer gets a private Docker daemon.'));
+    if (process.env.HUDDLE_NO_PULL !== '1') {
+      const dindImage = process.env.HUDDLE_DIND_IMAGE ?? 'docker:28-dind';
+      console.log(dim(`Pulling DinD engine image ${dindImage}`));
+      try { run(`${rt} pull ${dindImage}`); } catch { console.log(yellow(`[!] Could not pull ${dindImage} — the gateway will pull it on first devcontainer start.`)); }
+    }
+  }
+
   // Operator-token voor de control-plane-auth. Hergebruik het token uit de
   // config (zodat een bestaande browser-sessie/CLI blijft werken over re-inits),
   // anders genereer er één. We geven het aan de gateway mee via env én bewaren
@@ -145,6 +162,7 @@ export async function runInit(opts: InitOptions, images: ResolvedImages): Promis
     securityOptFlags +
     ` -e HUDDLE_RUNTIME=${runtime.name}` +
     ` -e HUDDLE_OPERATOR_TOKEN=${operatorToken}` +
+    dindFlags +
     ` -p ${HOST_PORT}:3000` +
     ` -v ${VOLUME}:/data` +
     ` -v ${runtime.socketPath}:/var/run/docker.sock` +
