@@ -21,6 +21,7 @@ import {
   forceDeleteContainer,
   startExistingContainer,
   cleanupContainerNetwork,
+  migrateContainer,
   resolveContainerByIp,
   isIdeName,
   execContainerOutput,
@@ -596,6 +597,23 @@ export async function createApiServer(): Promise<FastifyInstance> {
       try {
         const id = await createAndStartContainer(params);
         return { id, containerName };
+      } catch (err: any) {
+        return reply.code(500).send({ error: err.message });
+      }
+    }
+  );
+
+  // Migrate a devcontainer into the gateway's current mode (classic ↔ DinD) by
+  // recreating it from its own labels. Forced recreate; workspace + portal state
+  // are preserved. Same capabilities/UX afterwards.
+  app.post<{ Params: { name: string } }>(
+    '/api/docker/containers/:name/migrate',
+    async (req, reply) => {
+      try {
+        const res = await migrateContainer(req.params.name);
+        logAudit({ containerId: req.params.name, domain: 'docker-access', action: `admin:migrate-${res.mode}` });
+        notifyStateChanged();
+        return res;
       } catch (err: any) {
         return reply.code(500).send({ error: err.message });
       }

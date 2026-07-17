@@ -24,7 +24,7 @@ interface ParsedArgs {
 
 const VALUE_FLAGS = new Set(['url', 'ide', 'name', 'image', 'workspace', 'container', 'status', 'runtime', 'experiment']);
 const BOOLEAN_FLAGS = new Set(['help', 'h', 'empty', 'i', 'interactive', 'version', 'v']);
-const COMMANDS = new Set(['start', 'firewall', 'fw', 'init', 'experiment', 'help', 'version']);
+const COMMANDS = new Set(['start', 'firewall', 'fw', 'init', 'experiment', 'migrate', 'help', 'version']);
 
 function parseArgs(argv: string[]): ParsedArgs {
   const positional: string[] = [];
@@ -225,6 +225,30 @@ async function main(): Promise<void> {
       container: flagString(flags, 'container'),
       status: flagString(flags, 'status'),
     });
+    return;
+  }
+
+  if (cmd === 'migrate') {
+    // Recreate devcontainer(s) in the gateway's current mode (classic ↔ DinD).
+    // `huddle migrate <name>` for one, `huddle migrate` / `--all` for all.
+    const { get, post } = await import('./api');
+    let names: string[];
+    if (sub) {
+      names = [sub];
+    } else {
+      const list = await get<Array<{ name: string }>>('/api/docker/containers');
+      names = (Array.isArray(list) ? list : []).map((c) => c.name);
+      if (names.length === 0) { console.log('No devcontainers to migrate.'); return; }
+    }
+    for (const name of names) {
+      process.stdout.write(`Migrating ${name} ... `);
+      try {
+        const res = await post<{ mode: string }>(`/api/docker/containers/${encodeURIComponent(name)}/migrate`, {});
+        console.log(`OK (${res.mode})`);
+      } catch (err) {
+        console.log(`FAILED: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     return;
   }
 

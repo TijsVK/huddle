@@ -1075,3 +1075,49 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
 
   return id;
 }
+
+// ── Migration: recreate an existing devcontainer in the current mode ──────────
+// Switching HUDDLE_DIND changes a devcontainer's docker plumbing (socket-proxy ↔
+// private daemon), which can only take effect by recreating the container. This
+// reconstructs its StartParams from its own labels and recreates it in whatever
+// mode the gateway currently runs — so classic→DinD (or back) is a one-call,
+// forced-recreate migration. The workspace (worktree/bind) and all portal state
+// (grants, rules, action policies, approved ports — keyed by container name in
+// SQLite) are preserved; only ephemeral in-container state is lost.
+export async function migrateContainer(containerName: string): Promise<{ id: string; mode: string }> {
+  const inspect = await inspectContainer(containerName);
+  const labels: Record<string, string> = inspect?.Config?.Labels ?? {};
+  const ideRaw = labels['com.devcontainer.ide'];
+  const ideName: IdeName = isIdeName(ideRaw) ? ideRaw : (ideFromContainerLabels(labels) ?? 'intellij');
+  const workspaceDir = labels['com.intellij.devcontainer.sources.path'] ?? '';
+  const containerWorkspace = labels['com.intellij.devcontainer.workspace.path'] || `/workspaces/${containerName}`;
+  const presentableName = labels['com.intellij.devcontainer.presentable.name'] || containerName;
+  const empty = !workspaceDir;
+  const imageName: string = inspect?.Config?.Image || inspect?.Image;
+  if (!imageName) throw new Error(`cannot determine image for '${containerName}'`);
+  const hc = inspect?.HostConfig ?? {};
+  const memory = hc.Memory ? String(hc.Memory) : undefined;
+  const cpus = hc.CpuQuota && hc.CpuPeriod ? String(hc.CpuQuota / hc.CpuPeriod) : undefined;
+
+  console.log(`[migrate] recreating ${containerName} in ${DIND_ENABLED ? 'DinD' : 'classic'} mode`);
+  await forceDeleteContainer(containerName);
+  await cleanupContainerNetwork(containerName);
+
+  const params: StartParams = {
+    imageName, workspaceDir: empty ? '' : workspaceDir, containerName,
+    containerWorkspace, presentableName, ideName, empty, memory, cpus,
+  };
+  const id = await createAndStartContainer(params);
+  return { id, mode: DIND_ENABLED ? 'dind' : 'classic' };
+}
+
+// Detecteer of een draaiende devcontainer nog in de "oude" modus zit t.o.v. de
+// huidige HUDDLE_DIND-stand (heeft een socket-proxy mount terwijl DinD aanstaat,
+// of andersom). Gebruikt voor een niet-destructieve migratie-hint bij startup en
+// in het portal.
+export function needsMigration(inspect: any): boolean {
+  const mounts: any[] = inspect?.Mounts ?? [];
+  const hasHuddleProxy = mounts.some(m => m.Destination === '/var/run/huddle');
+  const hasDindSock = mounts.some(m => m.Destination === DIND_SOCKET_MOUNT);
+  return DIND_ENABLED ? !hasDindSock : !hasHuddleProxy && hasDindSock;
+}
