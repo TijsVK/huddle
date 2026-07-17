@@ -5,7 +5,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import Fastify, { FastifyInstance } from 'fastify';
 import { stateEvents, notifyStateChanged } from './events';
 import fastifyStatic from '@fastify/static';
-import { db, getAllGrants, setGrant, deleteGrant, getGrant, PERMANENT_UNTIL, isPermanentUntil, getAllRootGrants, setActionPolicy, logAudit, getCredentials, getAirlocked, setAirlocked, getSetting, setSetting, listFolderMappings, getFolderMapping, createFolderMapping, updateFolderMapping, deleteFolderMapping, FolderMapping, listApprovedHostPorts, addApprovedHostPort, removeApprovedHostPort, ApprovedHostPort } from './db';
+import { db, getAllGrants, setGrant, deleteGrant, getGrant, PERMANENT_UNTIL, isPermanentUntil, getAllRootGrants, setActionPolicy, logAudit, getAirlocked, setAirlocked, getSetting, setSetting, listFolderMappings, getFolderMapping, createFolderMapping, updateFolderMapping, deleteFolderMapping, FolderMapping, listApprovedHostPorts, addApprovedHostPort, removeApprovedHostPort, ApprovedHostPort } from './db';
 import { applyRootGrant, revokeRootGrant, rootGrantStatus } from './root-grant';
 import { DOCKER_ACTIONS, getEffectivePolicies, isKnownAction } from './docker-actions';
 import {
@@ -768,12 +768,9 @@ export async function createApiServer(): Promise<FastifyInstance> {
     return { dbPath, rowsBefore: before, rowsAfter: after, insertedId, insertError, last5 };
   });
 
-  // ── Container credentials ─────────────────────────────────────────────────
-  app.get<{ Params: { name: string } }>('/api/docker/containers/:name/credentials', async (req, reply) => {
-    const creds = getCredentials(req.params.name);
-    if (!creds) return reply.code(404).send({ error: 'not_found' });
-    return { password: creds.password, createdAt: creds.created_at };
-  });
+  // Container credentials endpoint verwijderd: de aparte `noot`-user + wachtwoord
+  // is vervangen door de root-grant (root voor de default vscode-user). Zie
+  // /api/authz/root-grants en root-grant.ts.
 
   // ── IDE gateway link ─────────────────────────────────────────────────────
   app.get<{ Params: { name: string } }>('/api/docker/containers/:name/ide-link', async (req, reply) => {
