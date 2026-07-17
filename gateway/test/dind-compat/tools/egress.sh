@@ -41,7 +41,7 @@ docker run -d --name "$dind" --privileged --network "container:${dc}" \
   -v "$sock":/var/run/dind -v "$data":/var/lib/docker -e DOCKER_TLS_CERTDIR= \
   -e HTTP_PROXY="$PXY" -e HTTPS_PROXY="$PXY" -e http_proxy="$PXY" -e https_proxy="$PXY" \
   -e NO_PROXY="$NOPROXY" -e no_proxy="$NOPROXY" \
-  "$DIND_IMAGE" dockerd --host=unix:///var/run/dind/docker.sock --mtu=1400 >/dev/null
+  "$DIND_IMAGE" sh -c 'dockerd --host=unix:///var/run/dind/docker.sock --mtu=1400 & DPID=$!; i=0; while [ ! -S /var/run/dind/docker.sock ] && [ $i -lt 120 ]; do sleep 0.5; i=$((i+1)); done; chmod 0666 /var/run/dind/docker.sock 2>/dev/null || true; wait $DPID' >/dev/null
 for i in $(seq 1 90); do docker exec "$dc" docker version >/dev/null 2>&1 && break; sleep 1; done
 docker exec "$dc" docker version >/dev/null 2>&1 || { fail "$NAME: dind daemon never ready on internal net"; cleanup; exit 1; }
 

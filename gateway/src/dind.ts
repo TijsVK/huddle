@@ -119,12 +119,18 @@ export async function createDindSidecar(
   // dockerd luistert op de unix-socket in de gedeelde volume. TLS uit
   // (DOCKER_TLS_CERTDIR leeg): het pad loopt over een unix-socket in een
   // volume die alleen de devcontainer en de sidecar delen, niet over TCP.
+  //
+  // dockerd maakt de socket standaard root:docker/0660. De devcontainer-user
+  // (vscode/dev) zit niet per se in een group met dezelfde GID over de container-
+  // grens, dus zou 'permission denied' krijgen (Aspire's DCP markeert de runtime
+  // dan als unhealthy en start geen containers). We chmod'en de socket daarom naar
+  // 0666 zodra hij bestaat. Dat is veilig: de socket leeft in een volume die
+  // ALLEEN deze devcontainer en zijn sidecar mounten — de beoogde client.
   const cmd = [
-    'dockerd',
-    `--host=unix://${DIND_SOCKET_PATH}`,
-    // Kleinere MTU zodat verkeer door de Huddle-proxy/overlay past (zelfde
-    // reden als processNetworkCreate in socket-proxy.ts).
-    '--mtu=1400',
+    'sh', '-c',
+    `dockerd --host=unix://${DIND_SOCKET_PATH} --mtu=1400 & DPID=$!; ` +
+    `i=0; while [ ! -S ${DIND_SOCKET_PATH} ] && [ $i -lt 120 ]; do sleep 0.5; i=$((i+1)); done; ` +
+    `chmod 0666 ${DIND_SOCKET_PATH} 2>/dev/null || true; wait $DPID`,
   ];
 
   const createBody = {

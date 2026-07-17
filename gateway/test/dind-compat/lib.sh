@@ -41,11 +41,13 @@ up() {
     -e DOCKER_HOST=unix:///var/run/dind/docker.sock \
     --cap-add NET_ADMIN \
     "$TESTDC_IMAGE" sleep infinity >/dev/null || { fail "$name: devcontainer failed to start"; return 1; }
+  # chmod the socket 0666 once dockerd creates it so a non-root devcontainer user
+  # (e.g. Aspire running as 'dev') can reach it — mirrors dind.ts.
   docker run -d --name "$dind" --privileged \
     --network "container:${dc}" \
     -v "$sock":/var/run/dind -v "$data":/var/lib/docker -v "$work":/work \
     -e DOCKER_TLS_CERTDIR= \
-    "$DIND_IMAGE" dockerd --host=unix:///var/run/dind/docker.sock --mtu=1400 >/dev/null \
+    "$DIND_IMAGE" sh -c 'dockerd --host=unix:///var/run/dind/docker.sock --mtu=1400 & DPID=$!; i=0; while [ ! -S /var/run/dind/docker.sock ] && [ $i -lt 120 ]; do sleep 0.5; i=$((i+1)); done; chmod 0666 /var/run/dind/docker.sock 2>/dev/null || true; wait $DPID' >/dev/null \
     || { fail "$name: dind sidecar failed to start"; return 1; }
   local i
   for i in $(seq 1 90); do
