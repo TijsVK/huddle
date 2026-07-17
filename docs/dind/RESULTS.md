@@ -28,6 +28,8 @@ the real Huddle constraint (internal network, all egress via a forward proxy).
 | workspace bind-through | ✅ pass | shared workspace readable+writable in nested containers (both directions); non-shared path limitation asserted |
 | egress (Tier-2) | ✅ pass | no direct internet without proxy; proxied HTTPS; image pull via proxy; nested egress via injected proxy; **loopback NOT proxied on `localhost` and `[::1]` (Aspire #12 fix)** |
 | .NET Aspire | ✅ pass | DCP-spawned container reaches **Running**; **no #12 403**, **no CopyFile block**, **no #61 "not owned by this devcontainer"** |
+| isolation (adversarial) | ✅ pass | private daemon shows no host/peer containers; can't see a peer devcontainer; privileged nested container confined to the private daemon |
+| nested runtime egress | ⚠️ boundary | nested-container HTTPS **routes through the proxy**; CA trust not auto-injected into nested containers (mount the CA / set `SSL_CERT_FILE`) — expected, matches Docker Desktop behind a corporate MITM |
 
 ## Full end-to-end (real gateway, not the harness stand-in)
 
