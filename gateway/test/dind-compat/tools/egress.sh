@@ -45,9 +45,13 @@ docker run -d --name "$dind" --privileged --network "container:${dc}" \
 for i in $(seq 1 90); do docker exec "$dc" docker version >/dev/null 2>&1 && break; sleep 1; done
 docker exec "$dc" docker version >/dev/null 2>&1 || { fail "$NAME: dind daemon never ready on internal net"; cleanup; exit 1; }
 
-# Nested containers inherit proxy env via the daemon client-config (as dind.ts does).
-docker exec -i "$dind" sh -c 'mkdir -p /root/.docker && cat > /root/.docker/config.json' <<JSON
-{"proxies":{"default":{"httpProxy":"$PXY","httpsProxy":"$PXY","noProxy":"$NOPROXY"}}}
+# Nested containers inherit proxy env via the DEVCONTAINER's docker client-config
+# (proxies.default) — exactly as docker.ts's dindClientProxyConfig does. A nested
+# container cannot resolve the name `huddle` (separate daemon network), so the
+# config uses the RESOLVED proxy IP, not the name.
+HIP=$(docker exec "$dc" getent hosts huddle | awk '{print $1}')
+docker exec -i "$dc" sh -c 'mkdir -p /root/.docker && cat > /root/.docker/config.json' <<JSON
+{"proxies":{"default":{"httpProxy":"http://$HIP:3128","httpsProxy":"http://$HIP:3128","noProxy":"localhost,127.0.0.1,::1,[::1]"}}}
 JSON
 
 # 1. No direct internet (egress guarantee): bypassing the proxy must FAIL.
@@ -64,9 +68,15 @@ if dcsh "$NAME" 'docker pull -q nginx:alpine' >/tmp/eg-pull.log 2>&1; then
   pass "$NAME: image pull through proxy (dockerd honours HTTPS_PROXY)"
 else fail "$NAME: image pull through proxy"; tail -3 /tmp/eg-pull.log >&2; rc=1; fi
 
-# 4. Nested container reaches internet ONLY via injected proxy env.
-out=$(dcsh "$NAME" 'docker run --rm nginx:alpine sh -c "wget -qO- -T 20 https://example.com >/dev/null 2>&1 && echo NET_OK || echo NET_FAIL"' 2>/dev/null | tr -d '\r')
-assert_contains "$out" "NET_OK" "$NAME: nested container egress via injected proxy" || rc=1
+# 4. Nested container reaches internet ONLY via injected proxy env (from the
+#    daemon client-config, as dind.ts does). curl honours the injected HTTPS_PROXY
+#    and does CONNECT (busybox wget can't tunnel TLS, so it's not a valid probe).
+code=$(dcsh "$NAME" "docker run --rm curlimages/curl:latest -s -o /dev/null -w '%{http_code}' -m 25 https://example.com" 2>/dev/null | tr -d '\r')
+[ "$code" = "200" ] && pass "$NAME: nested container egress via injected proxy (=$code)" || { fail "$NAME: nested egress via injected proxy ($code)"; rc=1; }
+# And confirm a nested container has NO direct (non-proxied) route out.
+if dcsh "$NAME" "docker run --rm curlimages/curl:latest --noproxy '*' -s -m 8 -o /dev/null https://example.com" >/dev/null 2>&1; then
+  fail "$NAME: EGRESS LEAK — nested container reached internet without proxy"; rc=1
+else pass "$NAME: nested container has no direct route (proxy-only egress)"; fi
 
 # 5. Aspire #12 fix: loopback must NOT be proxied. Publish a port, hit it on
 #    localhost and [::1] — a proxied loopback would 403/timeout at the proxy.

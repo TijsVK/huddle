@@ -167,6 +167,8 @@ iptables -F OUTPUT 2>/dev/null || true
 iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A OUTPUT -p tcp -d "$HUDDLE_IP" -j ACCEPT
 iptables -A OUTPUT -p tcp -j DROP
+
+${dindClientProxyConfig(DIND_ENABLED)}
 `;
   try {
     const exec = await dockerRequest('POST', `/containers/${encodeURIComponent(containerId)}/exec`, {
@@ -452,6 +454,28 @@ function dockerSockSymlink(sockPath: string): string {
 ln -sfn ${sockPath} /var/run/docker.sock 2>/dev/null || true`;
 }
 
+// DinD: laat élke geneste `docker run`/compose/build proxy-env erven zodat hun
+// egress door de Huddle-proxy loopt. Dit is een CLIENT-feature (proxies.default
+// in ~/.docker/config.json), dus het moet in de DEVCONTAINER staan, voor de
+// gebruikers die docker draaien (root + vscode). Belangrijk: een geneste
+// container zit in het aparte netwerk van de private daemon en kan de naam
+// `huddle` NIET resolven — daarom het opgeloste $HUDDLE_IP i.p.v. de naam.
+// Vereist dat $HUDDLE_IP al gezet is (gebeurt in beide config-scripts vóór de
+// iptables-regels). Leeg in klassieke modus.
+function dindClientProxyConfig(enabled: boolean): string {
+  if (!enabled) return '';
+  return `# DinD: proxy-env voor geneste containers via docker-client-config.
+if [ -n "$HUDDLE_IP" ]; then
+  for _h in /root /home/vscode; do
+    mkdir -p "$_h/.docker"
+    cat > "$_h/.docker/config.json" <<EOF
+{"proxies":{"default":{"httpProxy":"http://$HUDDLE_IP:80","httpsProxy":"http://$HUDDLE_IP:80","noProxy":"localhost,127.0.0.1,::1,[::1]"}}}
+EOF
+  done
+  chown -R vscode:vscode /home/vscode/.docker 2>/dev/null || true
+fi`;
+}
+
 // Finding #15 (IDE-kanaal, VS Code Remote + JetBrains Gateway): het attach-kanaal
 // loopt over `docker exec`/stdio en wordt door NOCH de egress-proxy NOCH de
 // socket-proxy gezien. Het echte host-token komt NOOIT als bestand binnen; VS
@@ -562,6 +586,8 @@ iptables -t nat -C OUTPUT -p tcp --dport 80 ! -d "$HUDDLE_IP" -j DNAT --to-desti
 iptables -C OUTPUT -o lo -j ACCEPT 2>/dev/null || iptables -A OUTPUT -o lo -j ACCEPT
 iptables -C OUTPUT -p tcp -d "$HUDDLE_IP" -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p tcp -d "$HUDDLE_IP" -j ACCEPT
 iptables -C OUTPUT -p tcp -j DROP 2>/dev/null || iptables -A OUTPUT -p tcp -j DROP
+
+${dindClientProxyConfig(DIND_ENABLED)}
 
 # Installeer huddle's MITM-CA in de system trust store + zet env-vars voor
 # tools die niet uit de system store lezen (node).
@@ -689,6 +715,8 @@ iptables -t nat -C OUTPUT -p tcp --dport 80 ! -d "$HUDDLE_IP" -j DNAT --to-desti
 iptables -C OUTPUT -o lo -j ACCEPT 2>/dev/null || iptables -A OUTPUT -o lo -j ACCEPT
 iptables -C OUTPUT -p tcp -d "$HUDDLE_IP" -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p tcp -d "$HUDDLE_IP" -j ACCEPT
 iptables -C OUTPUT -p tcp -j DROP 2>/dev/null || iptables -A OUTPUT -p tcp -j DROP
+
+${dindClientProxyConfig(DIND_ENABLED)}
 
 # Installeer huddle's MITM-CA in de system trust store + zet env-vars voor
 # tools die niet uit de system store lezen (node, java).

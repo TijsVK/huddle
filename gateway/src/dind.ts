@@ -80,19 +80,14 @@ export async function ensureDindSockVolume(containerName: string): Promise<void>
   await ensureVolume(dindSockVolume(containerName), containerName);
 }
 
-// De docker-client-config die we in de sidecar zetten zodat élke geneste
-// `docker run`/compose/build proxy-env erft (egress via de Huddle-proxy).
-function proxyClientConfig(): string {
-  return JSON.stringify({
-    proxies: {
-      default: {
-        httpProxy: 'http://huddle:80',
-        httpsProxy: 'http://huddle:80',
-        noProxy: 'localhost,127.0.0.1,::1,[::1],huddle',
-      },
-    },
-  });
-}
+// Proxy-env voor geneste containers wordt NIET hier (in de sidecar) gezet: het
+// injecteren van proxy-env bij `docker run` is een CLIENT-feature van de docker-
+// CLI (proxies.default in ~/.docker/config.json), dus het hoort in de
+// DEVCONTAINER (waar de CLI/compose draait), niet op de daemon. Bovendien kan
+// een geneste container de naam `huddle` niet resolven (die leeft alleen in de
+// netns van de devcontainer, niet in het aparte netwerk van de private daemon),
+// dus de client-config gebruikt het OPGELOSTE huddle-IP. Zie het config-script
+// in docker.ts (buildDindClientProxyConfig).
 
 // Maak (of herstart) de DinD-sidecar voor een devcontainer. De devcontainer moet
 // al draaien: de sidecar deelt zijn netwerk-namespace via container:<id>.
@@ -156,19 +151,6 @@ export async function createDindSidecar(containerName: string, devcontainerId: s
   );
   const id: string = created.Id;
   await dockerRequest('POST', `/containers/${id}/start`, {});
-
-  // Proxy-client-config in de sidecar zetten zodat geneste containers proxy-env
-  // erven. Via exec omdat het na de daemon-start moet (root in de sidecar).
-  try {
-    const cfg = proxyClientConfig().replace(/'/g, `'\\''`);
-    const script = `mkdir -p /root/.docker && printf '%s' '${cfg}' > /root/.docker/config.json`;
-    const exec = await dockerRequest('POST', `/containers/${id}/exec`, {
-      User: 'root', Cmd: ['sh', '-c', script], AttachStdout: false, AttachStderr: false,
-    });
-    await dockerRequest('POST', `/exec/${exec.Id}/start`, { Detach: true });
-  } catch (err: any) {
-    console.warn(`[dind] proxy client-config for ${name} failed:`, err.message);
-  }
 
   console.log(`[dind] sidecar ${name} started (netns of ${containerName})`);
   return id;
