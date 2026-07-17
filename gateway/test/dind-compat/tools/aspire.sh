@@ -53,8 +53,13 @@ dcshu "$NAME" dev "$DENV; cd ~/apphost && dotnet restore" >/tmp/aspire-restore.l
 # dev-certs (Aspire copies these into containers — the #12 CopyFile path).
 dcshu "$NAME" dev "$DENV; dotnet dev-certs https >/dev/null 2>&1 || true"
 
-log "$NAME: dotnet run (AppHost) — DCP orchestration; log on shared /work"
-dcshu "$NAME" dev "$DENV; cd ~/apphost && setsid bash -c 'dotnet run --project AppHost.csproj > /work/aspire-run.log 2>&1' >/dev/null 2>&1 < /dev/null &" >/dev/null 2>&1
+log "$NAME: dotnet run (AppHost) — DCP orchestration"
+dcshu "$NAME" dev "$DENV; cd ~/apphost && setsid bash -c 'dotnet run --project AppHost.csproj > \$HOME/apphost/run.log 2>&1' </dev/null >/dev/null 2>&1 &" >/dev/null 2>&1
+sleep 8
+# Confirm it actually launched (perms / crash guard).
+if ! dcsh "$NAME" 'pgrep -f "dotnet" >/dev/null 2>&1'; then
+  log "$NAME: dotnet did not stay running; log tail:"; dcsh "$NAME" 'tail -15 /home/dev/apphost/run.log 2>/dev/null' >&2
+fi
 
 # Wait for DCP to bring the container to Running (via the private daemon).
 running=""
@@ -65,7 +70,7 @@ for i in $(seq 1 72); do
 done
 [ -n "$running" ] && pass "$NAME: DCP-spawned container reached Running (#61 inspect path OK)" || { fail "$NAME: DCP container never reached Running"; rc=1; }
 
-runlog=$(dcsh "$NAME" 'cat /work/aspire-run.log 2>/dev/null' 2>/dev/null)
+runlog=$(dcsh "$NAME" 'cat /home/dev/apphost/run.log 2>/dev/null' 2>/dev/null)
 if printf '%s' "$runlog" | grep -qiE "proxy tunnel request .* failed with status code '403'|403 \(Forbidden\)"; then
   fail "$NAME: DCP loopback got 403 (issue #12 regression)"; rc=1
 else pass "$NAME: no DCP loopback 403 (issue #12 fixed)"; fi
