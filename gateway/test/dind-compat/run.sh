@@ -9,7 +9,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib.sh"
 build_testdc
 
-ALL=(compose testcontainers buildx privileged k3d localstack act devcontainer-cli workspace isolation kafka egress aspire)
+ALL=(compose testcontainers buildx privileged k3d localstack act devcontainer-cli workspace isolation kafka compose-build registry resources egress aspire)
 TOOLS=("$@"); [ ${#TOOLS[@]} -eq 0 ] && TOOLS=("${ALL[@]}")
 NET="${NET:-bridge}"
 
@@ -17,7 +17,7 @@ NET="${NET:-bridge}"
 declare -A BUDGET=(
   [compose]=300 [testcontainers]=420 [buildx]=300 [privileged]=300
   [k3d]=600 [localstack]=420 [act]=420 [devcontainer-cli]=600
-  [workspace]=200 [isolation]=300 [kafka]=700 [egress]=500 [aspire]=1200
+  [workspace]=200 [isolation]=300 [kafka]=700 [compose-build]=300 [registry]=400 [resources]=250 [egress]=500 [aspire]=1200
 )
 
 RESULTS="$HERE/../../../docs/dind/RESULTS.md"

@@ -133,11 +133,23 @@ export async function createDindSidecar(
   // de CA in de sidecar's trust store VOORDAT dockerd start. (docker:dind is
   // Alpine met update-ca-certificates.)
   const caB64 = Buffer.from(getCaCertPem(), 'utf8').toString('base64');
+  // We bypass dockerd-entrypoint.sh (to inject the CA + chmod the socket), so we
+  // must replicate its cgroup-v2 prep: move our own process out of the root
+  // cgroup and enable all controllers in cgroup.subtree_control. Without this the
+  // subtree stays empty and nested containers get NO memory/cpu limits (only pids)
+  // — the "failed to enable controllers" warning.
+  const cgroupPrep =
+    `if [ -f /sys/fs/cgroup/cgroup.controllers ]; then ` +
+    `mkdir -p /sys/fs/cgroup/init 2>/dev/null || true; ` +
+    `xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true; ` +
+    `sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true; ` +
+    `fi; `;
   const cmd = [
     'sh', '-c',
     `mkdir -p /usr/local/share/ca-certificates; ` +
     `echo "$HUDDLE_CA_B64" | base64 -d > /usr/local/share/ca-certificates/huddle-ca.crt; ` +
     `update-ca-certificates 2>/dev/null || cat /usr/local/share/ca-certificates/huddle-ca.crt >> /etc/ssl/certs/ca-certificates.crt; ` +
+    cgroupPrep +
     `dockerd --host=unix://${DIND_SOCKET_PATH} --mtu=1400 & DPID=$!; ` +
     `i=0; while [ ! -S ${DIND_SOCKET_PATH} ] && [ $i -lt 120 ]; do sleep 0.5; i=$((i+1)); done; ` +
     `chmod 0666 ${DIND_SOCKET_PATH} 2>/dev/null || true; wait $DPID`,
