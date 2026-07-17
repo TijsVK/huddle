@@ -30,6 +30,8 @@ the real Huddle constraint (internal network, all egress via a forward proxy).
 | .NET Aspire | ✅ pass | DCP-spawned container reaches **Running**; **no #12 403**, **no CopyFile block**, **no #61 "not owned by this devcontainer"** |
 | isolation (adversarial) | ✅ pass | private daemon shows no host/peer containers; can't see a peer devcontainer; privileged nested container confined to the private daemon |
 | nested runtime egress | ⚠️ boundary | nested-container HTTPS **routes through the proxy**; CA trust not auto-injected into nested containers (mount the CA / set `SSL_CERT_FILE`) — expected, matches Docker Desktop behind a corporate MITM |
+| Kafka (Testcontainers) | ✅ pass | create topic + produce + consume via the **advertised listener** (mapped port on the devcontainer's localhost, shared netns) |
+| toolchain CA matrix | ✅ pass | git / `go mod` / rustup / `cargo fetch` all work through the MITM (system trust store). Surfaced+fixed: **sudo dropped the proxy/CA env** → `sudo apt-get` had no network; fixed with a sudoers `env_keep` drop-in |
 
 ## Full end-to-end (real gateway, not the harness stand-in)
 

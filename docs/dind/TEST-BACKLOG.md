@@ -15,12 +15,11 @@ Ranked by likelihood of exposing a real bug. ✅ = now covered, ⬜ = todo,
   Desktop behind a corporate MITM); not a regression from classic huddle.
 
 ## Tier 1 — most likely to break (distinct failure modes)
-- ⬜ **CA-trust matrix per toolchain through the MITM.** cargo/rust uses **rustls →
-  ignores the system CA store** (classic break); `go mod` (GOPROXY + sumdb),
-  Maven/Gradle (Java truststore — same class as the JBR cert issue), pip, npm.
-  Each is a separate trust path; some need per-tool CA config.
-- ⬜ **Kafka** (Testcontainers/compose) — `advertised.listeners` + localhost; the
-  shared-netns port mapping is what makes it work or hang under DinD.
+- ✅ **CA-trust matrix per toolchain** — `e2e-toolchain-ca.sh`: git/go/rustup/cargo
+  all pass through the MITM (system store). rustls-break did NOT reproduce (modern
+  rustup/cargo honor the system store). Found+fixed: sudo dropped proxy/CA env.
+  (Still ⬜: Maven/Gradle Java truststore, pip — likely need per-tool CA config.)
+- ✅ **Kafka** (Testcontainers) — `tools/kafka.sh`: advertised listener + localhost works.
 - ⬜ **Aspire project + EF migrations** — project resource connects to sqlserver and
   runs a migration (service discovery + loopback + DB round-trip), deeper than the
   container-only repro.
