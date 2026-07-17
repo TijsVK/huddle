@@ -60,6 +60,17 @@ Two servers run in the same process:
 | **Docker proxy socket** | No full Docker socket, but controlled Docker actions through a per-container proxy with a label policy. |
 | **No root user** | A safer default user; `sudo` is only possible in a controlled way through Huddle. |
 
+> **Experimental — Docker-in-Docker mode (`HUDDLE_DIND=1`).** Instead of the
+> filtering proxy socket, each devcontainer gets its **own private Docker daemon**
+> (a `dind-<name>` sidecar sharing the devcontainer's network namespace). Demanding
+> tools that the proxy policy breaks — .NET Aspire, Testcontainers, kind/k3d,
+> LocalStack, `act`, the Dev Containers CLI — work out of the box, while egress
+> stays firewalled and the host daemon and peer devcontainers stay unreachable.
+> See [`docs/dind/ARCHITECTURE.md`](docs/dind/ARCHITECTURE.md) and the
+> tool-compatibility results in [`docs/dind/RESULTS.md`](docs/dind/RESULTS.md).
+> This branch also adds a **permanent** docker grant and a **root-for-the-default-user**
+> grant (time-limited or permanent) that replaces the old `noot` + password flow.
+
 ---
 
 ## Features
