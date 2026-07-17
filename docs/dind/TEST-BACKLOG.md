@@ -31,8 +31,9 @@ Ranked by likelihood of exposing a real bug. ✅ = now covered, ⬜ = todo,
 - ✅ Resource limits on nested containers — `tools/resources.sh` (fixed cgroup-v2 delegation).
 - ✅ Playwright — `tools/playwright.sh`. ✅ multi-DB, RabbitMQ, web/HMR websockets.
 - ✅ **Migration** classic↔DinD — `e2e-migrate.sh` (+ `huddle migrate`).
-- ⬜ Java Testcontainers (Ryuk + copyFileToContainer), kind `load docker-image` +
-  Ingress, Skaffold/Tilt/dagger dev loops, helm-on-k3d, pip/maven/gradle CA.
+- ✅ kind (kubeadm+systemd nodes, image sideload) — `tools/kind.sh`.
+- ⬜ Java Testcontainers (Ryuk from JVM), Skaffold/Tilt/dagger dev loops, gradle CA,
+  docker exec/logs streaming (portal terminal), IPv6/dual-stack.
 
 ## Can't run in this environment — matrix gaps to flag
 - ⬜ **Real IDE attach** (JetBrains Gateway / VS Code Remote) — the actual user flow,
