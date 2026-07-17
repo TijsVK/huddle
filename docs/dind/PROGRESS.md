@@ -93,17 +93,17 @@ the filtering socket-proxy.
 - [x] Removed orphaned credentials endpoint (noot fully retired)
 - [x] Commit incrementally; pushed to TijsVK fork
 
-## STATUS (rolling): broad workflow coverage + seamless migration + 6 bugs fixed.
-Battery runner: `gateway/test/dind-compat/battery.sh` (all harness tools + real-
-gateway E2Es → docs/dind/RESULTS.md). Coverage now: compose, testcontainers,
-buildx, privileged, k3d, localstack, act, devcontainer-cli, workspace, isolation,
-kafka, compose-build, registry, resources, multidb, rabbitmq, webdev, playwright,
-egress, + real-gateway E2Es: aspire-sqlserver, nested-egress, toolchain-ca
-(git/go/rust/pip/maven), restart, migrate. Bugs found+fixed: proxy-crash,
-socket-perms, sidecar-CA, sudo-env, cgroup-delegation, (pip-CA env). Migration
-(classic↔DinD) is E2E-verified + `huddle migrate`.
-Next backlog: Java Testcontainers, kind image-load+Ingress, helm-on-k3d, dagger/
-skaffold/tilt. See TEST-BACKLOG.md.
+## STATUS (rolling): deep adversarial pass. 7 bugs fixed; ~30 automated tests.
+Battery: `gateway/test/dind-compat/battery.sh` (all harness tools + real-gateway
+E2Es -> docs/dind/RESULTS.md). Harness tools: compose, testcontainers, buildx,
+privileged, k3d, kind, helm, localstack, act, devcontainer-cli, workspace,
+isolation, kafka, multidb, rabbitmq, webdev, playwright, compose-build, registry,
+resources, concurrent, nested2, exec-stream, egress. Real-gateway E2Es:
+aspire-sqlserver, nested-egress, toolchain-ca (git/go/rust/pip/maven), restart,
+restart-devcontainer, migrate, upgrade, grpc-noproxy, delete-cleanup.
+Bugs fixed: proxy-crash, socket-perms, sidecar-CA, sudo-env, cgroup-delegation,
+pip-CA, host.docker.internal-noproxy (Aspire dashboard gRPC). Migration classic<->
+DinD + huddle migrate; in-place update + workspace-change survival verified.
 
 ## (earlier milestone) core complete + FULL E2E PASS.
 212 gateway tests green; gateway+cli typecheck; Angular build passes; 11/11
