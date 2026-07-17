@@ -29,6 +29,30 @@ the real Huddle constraint (internal network, all egress via a forward proxy).
 | egress (Tier-2) | ✅ pass | no direct internet without proxy; proxied HTTPS; image pull via proxy; nested egress via injected proxy; **loopback NOT proxied on `localhost` and `[::1]` (Aspire #12 fix)** |
 | .NET Aspire | ✅ pass | DCP-spawned container reaches **Running**; **no #12 403**, **no CopyFile block**, **no #61 "not owned by this devcontainer"** |
 
+## Full end-to-end (real gateway, not the harness stand-in)
+
+`gateway/test/dind-compat/e2e-aspire-sqlserver.sh` runs the **actual** stack:
+`huddle init` (HUDDLE_DIND=1) → allowlist nuget/mcr in the firewall →
+`/api/docker/start` a real VS Code devcontainer → inside it, a .NET Aspire
+AppHost with **SqlServer** (issue #61's exact repro) → confirm the SQL container
+comes up and answers a query.
+
+Verified on Docker 29 (WSL2):
+- ✅ real gateway boots in DinD mode; devcontainer + private daemon created by the gateway's own code
+- ✅ private daemon reachable as the non-root `vscode` user
+- ✅ `dotnet restore` succeeds through the Huddle egress firewall (MITM + CA)
+- ✅ DCP reconciles the SqlServer container — **no "not owned by this devcontainer"** (issue #61 was exactly this)
+- ✅ SqlServer image (~1.7 GB) pulls through the proxy; container reaches Running
+- ✅ **`SELECT @@VERSION` returns "Microsoft SQL Server 2022"** — fully functional
+- ✅ no #12 (403 / CopyFile) and no #61 (inspect ownership) errors in the AppHost/DCP logs
+
+Two production bugs were found and fixed by this E2E:
+1. **Gateway crash on a malformed proxied path** (`ERR_UNESCAPED_CHARACTERS`) —
+   a single odd request path from DCP took the whole gateway down. Now the
+   forwarded path is percent-encoded and that error class is non-fatal.
+2. **Sidecar dockerd didn't trust the Huddle MITM CA** → image pulls failed
+   `x509: unknown authority`. The sidecar now installs the CA before dockerd.
+
 ## Why these were failing before (classic socket-proxy)
 
 - **Aspire** (#12/#61): DCP loopback proxied → 403; `docker CopyFile` blocked;

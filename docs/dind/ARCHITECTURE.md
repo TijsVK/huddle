@@ -63,6 +63,12 @@ Unchanged model, extended to nested containers:
   (regenerated on restart in `refreshContainerIptables`).
 - Result: no direct internet without the proxy (verified), and `dockerd`'s own
   image pulls go through `HTTPS_PROXY` too.
+- Huddle MITMs outbound HTTPS with its own CA, so the sidecar `dockerd` installs
+  the **Huddle CA into its trust store before starting** — otherwise every image
+  pull fails with `x509: certificate signed by unknown authority`.
+- The private daemon's unix socket is chmod'd **0666** once created so the
+  non-root devcontainer user (vscode) can reach it (it lives in a volume shared
+  only by the devcontainer + its sidecar).
 
 Limitation: a container created via the **raw Docker API** (e.g. Aspire DCP)
 does not get the CLI's `proxies.default` injection; it is still confined by the

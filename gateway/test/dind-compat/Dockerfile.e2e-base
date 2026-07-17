@@ -1,0 +1,32 @@
+# Devcontainer base image for the full Aspire E2E. Satisfies what the gateway's
+# bootstrap assumes (vscode user, apt, update-ca-certificates, iptables, sudo,
+# docker CLI) and bakes in the .NET SDK + libicu so the SDK itself isn't gated by
+# the egress firewall (only nuget restore + the SQL image pull go through it).
+FROM mcr.microsoft.com/devcontainers/base:debian
+
+ENV DEBIAN_FRONTEND=noninteractive
+# libicu package name is version-specific per Debian release (libicu72 on
+# bookworm, libicu76 on trixie); resolve it dynamically. Docker apt repo uses the
+# base image's own codename.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gnupg iptables inotify-tools sudo procps iproute2 \
+    && ICU=$(apt-cache search --names-only '^libicu[0-9]+$' | awk '{print $1}' | sort -V | tail -1) \
+    && apt-get install -y --no-install-recommends "$ICU" \
+    && . /etc/os-release \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" \
+       > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
+# .NET SDK 10 into /usr/share/dotnet, on PATH for all users.
+RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/di.sh \
+    && bash /tmp/di.sh --channel 10.0 --install-dir /usr/share/dotnet \
+    && ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet \
+    && rm -f /tmp/di.sh
+ENV DOTNET_ROOT=/usr/share/dotnet DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+RUN usermod -aG docker vscode 2>/dev/null || (groupadd -f docker && usermod -aG docker vscode)
