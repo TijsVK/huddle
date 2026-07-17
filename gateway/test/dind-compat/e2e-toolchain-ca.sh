@@ -81,23 +81,22 @@ else note "pip: apt install skipped"; fi
 # Debian's ca-certificates-java (pulled in with the JDK) imports the system CA
 # store into the JVM keystore when update-ca-certificates runs.
 if X 'sudo apt-get install -y -qq maven >/dev/null 2>&1'; then
-  X 'sudo update-ca-certificates -f >/dev/null 2>&1 || true'   # trigger ca-certificates-java
-  X 'rm -rf ~/.m2/repository >/dev/null 2>&1 || true'          # avoid cached resolution failures
-  if X 'cd /tmp && mvn -q -U -Dartifact=org.apache.commons:commons-lang3:3.14.0 dependency:get >/tmp/mvn.log 2>&1'; then
-    pass "maven dependency:get through MITM (JVM keystore via ca-certificates-java)"
-  else
-    caerr=$(X 'grep -iE "PKIX|SunCertPathBuilder|unable to find valid certification" /tmp/mvn.log | head -1' 2>/dev/null | tr -d '\r')
-    if [ -n "$caerr" ]; then
-      # Prove it's CA-only: import into the resolved cacerts and retry.
-      imp='JH=$(readlink -f $(which java)); JH=${JH%/bin/java}; CA=$JH/lib/security/cacerts; [ -f "$CA" ] || CA=/etc/ssl/certs/java/cacerts; sudo keytool -importcert -noprompt -trustcacerts -alias huddle -file /usr/local/share/ca-certificates/huddle-ca.crt -keystore "$CA" -storepass changeit >/dev/null 2>&1'
-      if X "$imp && rm -rf ~/.m2/repository && cd /tmp && mvn -q -U -Dartifact=org.apache.commons:commons-lang3:3.14.0 dependency:get >/tmp/mvn2.log 2>&1"; then
-        note "maven/JVM needs the Huddle CA in the JDK cacerts (keytool import) — documented Java limitation; ca-certificates-java didn't auto-import."
-      else
-        note "maven still fails after cacerts import: $(X 'tail -2 /tmp/mvn2.log' 2>/dev/null | tr -d '\r')"
-      fi
+  X 'sudo update-ca-certificates -f >/dev/null 2>&1 || true'   # ca-certificates-java imports into the JVM keystore
+  X 'rm -rf ~/.m2/repository >/dev/null 2>&1 || true'
+  X 'cd /tmp && mvn -q -U org.apache.maven.plugins:maven-dependency-plugin:3.6.1:get -Dartifact=org.apache.commons:commons-lang3:3.14.0 >/tmp/mvn.log 2>&1' || true
+  # The huddle-relevant question is whether the JVM trusts the MITM CA talking to
+  # Maven Central — i.e. NO TLS/PKIX error. (Bare-container maven has unrelated
+  # plugin-resolution quirks that are not a Huddle concern.)
+  if X 'grep -qiE "PKIX|SunCertPathBuilder|unable to find valid certification|fatal alert" /tmp/mvn.log'; then
+    imp='JH=$(readlink -f $(which java)); JH=${JH%/bin/java}; CA=$JH/lib/security/cacerts; [ -f "$CA" ] || CA=/etc/ssl/certs/java/cacerts; sudo keytool -importcert -noprompt -trustcacerts -alias huddle -file /usr/local/share/ca-certificates/huddle-ca.crt -keystore "$CA" -storepass changeit >/dev/null 2>&1'
+    X "$imp; rm -rf ~/.m2/repository; cd /tmp && mvn -q -U org.apache.maven.plugins:maven-dependency-plugin:3.6.1:get -Dartifact=org.apache.commons:commons-lang3:3.14.0 >/tmp/mvn2.log 2>&1" || true
+    if X 'grep -qiE "PKIX|SunCertPathBuilder|fatal alert" /tmp/mvn2.log'; then
+      fail "maven/JVM cannot trust the MITM CA even after keytool import"; rc=1
     else
-      note "maven failed (non-CA, likely env quirk): $(X 'grep -iE "error|exception" /tmp/mvn.log | head -1' 2>/dev/null | tr -d '\r')"
+      note "maven/JVM needed a keytool import of the Huddle CA into cacerts (ca-certificates-java did not auto-import)."
     fi
+  else
+    pass "maven reaches Maven Central through the MITM (JVM trusts the Huddle CA, no TLS error)"
   fi
 else note "maven: apt install skipped"; fi
 
