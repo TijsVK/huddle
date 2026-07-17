@@ -4,6 +4,7 @@ import { createApiServer } from './api';
 import { listDevcontainers, networkExists, connectNetwork, refreshContainerIptables, DIND_ENABLED } from './docker';
 import { createContainerProxy } from './socket-proxy';
 import { ensureDindSidecar } from './dind';
+import { initRootGrants } from './root-grant';
 import { initCa } from './tls-ca';
 import { sanitizeResolvConf, scheduleSettlingSanitize } from './dns-egress';
 
@@ -77,6 +78,8 @@ async function initContainerIptables(): Promise<void> {
 }
 
 initContainerProxies();
+// Root-grants herstellen: verlopen intrekken, actieve opnieuw toepassen + timer.
+initRootGrants().catch(err => console.error('[root-grant] init failed:', err?.message));
 // Reconnecten aan de devcontainer-netwerken vervuilt resolv.conf (Podman zet de
 // internal-net aardvark-DNS erin); sanitize erna zodat egress-DNS blijft werken,
 // óók als er (nog) geen devcontainers zijn. De settling-runs vangen bovendien de

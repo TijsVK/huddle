@@ -21,6 +21,10 @@ export function initDb(): void {
       container_id TEXT PRIMARY KEY,
       until INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS root_grants (
+      container_id TEXT PRIMARY KEY,
+      until INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS docker_action_policies (
       container_id TEXT NOT NULL,
       action TEXT NOT NULL,
@@ -195,6 +199,16 @@ export function setAirlocked(name: string, value: boolean): void {
 
 // ── Docker access grants ─────────────────────────────────────────────────────
 
+// Sentinel voor een PERMANENTE (niet-verlopende) grant: een ver-in-de-toekomst
+// timestamp (2100-01-01). Alle bestaande `until <= now`-checks blijven zo
+// ongewijzigd werken (een 2100-timestamp is altijd > now); alleen de UI toont
+// 'permanent' i.p.v. een afteltimer. Zie docs/dind/PROGRESS.md (feature A/B).
+export const PERMANENT_UNTIL = 4102444800; // 2100-01-01T00:00:00Z
+
+export function isPermanentUntil(until: number): boolean {
+  return until >= PERMANENT_UNTIL;
+}
+
 export function setGrant(containerId: string, until: number): void {
   db.prepare(`INSERT INTO docker_grants (container_id, until) VALUES (?, ?)
               ON CONFLICT(container_id) DO UPDATE SET until = excluded.until`)
@@ -212,6 +226,33 @@ export function deleteGrant(containerId: string): void {
 
 export function getAllGrants(): Record<string, { until: number }> {
   const rows = db.prepare(`SELECT container_id, until FROM docker_grants`).all() as
+    { container_id: string; until: number }[];
+  return Object.fromEntries(rows.map((r) => [r.container_id, { until: r.until }]));
+}
+
+// ── Root grants (root voor de default vscode-user) ───────────────────────────
+// Vervangt de aparte `noot`-user + wachtwoord: een tijdgebonden (of permanente)
+// grant geeft de standaard `vscode`-user passwordless sudo. Anders dan de
+// docker-grant is dit STATEFUL in de container (sudoers-bestand), dus verlopen
+// vereist een actieve revoke — de api plant die (setTimeout), tenzij permanent.
+
+export function setRootGrant(containerId: string, until: number): void {
+  db.prepare(`INSERT INTO root_grants (container_id, until) VALUES (?, ?)
+              ON CONFLICT(container_id) DO UPDATE SET until = excluded.until`)
+    .run(containerId, until);
+}
+
+export function getRootGrant(containerId: string): { until: number } | null {
+  return db.prepare(`SELECT until FROM root_grants WHERE container_id = ?`)
+    .get(containerId) as { until: number } | null;
+}
+
+export function deleteRootGrant(containerId: string): void {
+  db.prepare(`DELETE FROM root_grants WHERE container_id = ?`).run(containerId);
+}
+
+export function getAllRootGrants(): Record<string, { until: number }> {
+  const rows = db.prepare(`SELECT container_id, until FROM root_grants`).all() as
     { container_id: string; until: number }[];
   return Object.fromEntries(rows.map((r) => [r.container_id, { until: r.until }]));
 }

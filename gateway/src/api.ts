@@ -5,7 +5,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import Fastify, { FastifyInstance } from 'fastify';
 import { stateEvents, notifyStateChanged } from './events';
 import fastifyStatic from '@fastify/static';
-import { db, getAllGrants, setGrant, deleteGrant, getGrant, setActionPolicy, logAudit, getCredentials, getAirlocked, setAirlocked, getSetting, setSetting, listFolderMappings, getFolderMapping, createFolderMapping, updateFolderMapping, deleteFolderMapping, FolderMapping, listApprovedHostPorts, addApprovedHostPort, removeApprovedHostPort, ApprovedHostPort } from './db';
+import { db, getAllGrants, setGrant, deleteGrant, getGrant, PERMANENT_UNTIL, isPermanentUntil, getAllRootGrants, setActionPolicy, logAudit, getCredentials, getAirlocked, setAirlocked, getSetting, setSetting, listFolderMappings, getFolderMapping, createFolderMapping, updateFolderMapping, deleteFolderMapping, FolderMapping, listApprovedHostPorts, addApprovedHostPort, removeApprovedHostPort, ApprovedHostPort } from './db';
+import { applyRootGrant, revokeRootGrant, rootGrantStatus } from './root-grant';
 import { DOCKER_ACTIONS, getEffectivePolicies, isKnownAction } from './docker-actions';
 import {
   listDevcontainers,
@@ -605,19 +606,24 @@ export async function createApiServer(): Promise<FastifyInstance> {
 
   app.get('/api/authz/grants', async () => getAllGrants());
 
-  app.put<{ Params: { container: string }; Body: { minutes: number } }>(
+  app.put<{ Params: { container: string }; Body: { minutes?: number; permanent?: boolean } }>(
     '/api/authz/grants/:container',
     async (req, reply) => {
       const { container } = req.params;
-      const { minutes } = req.body;
-      if (!minutes || minutes < 1 || minutes > 120) {
-        return reply.code(400).send({ error: 'minutes must be 1-120' });
+      const { minutes, permanent } = req.body ?? {};
+      let until: number;
+      if (permanent) {
+        until = PERMANENT_UNTIL;
+      } else {
+        if (!minutes || minutes < 1 || minutes > 120) {
+          return reply.code(400).send({ error: 'minutes must be 1-120 (or set permanent:true)' });
+        }
+        until = Math.floor(Date.now() / 1000) + minutes * 60;
       }
-      const until = Math.floor(Date.now() / 1000) + minutes * 60;
       setGrant(container, until);
-      logAudit({ containerId: container, domain: 'docker-access', action: `admin:grant-${minutes}m` });
+      logAudit({ containerId: container, domain: 'docker-access', action: `admin:grant-${permanent ? 'permanent' : `${minutes}m`}` });
       notifyStateChanged();
-      return { container, until };
+      return { container, until, permanent: isPermanentUntil(until) };
     }
   );
 
@@ -627,6 +633,44 @@ export async function createApiServer(): Promise<FastifyInstance> {
       const { container } = req.params;
       deleteGrant(container);
       logAudit({ containerId: container, domain: 'docker-access', action: 'admin:grant-revoke' });
+      notifyStateChanged();
+      return { ok: true };
+    }
+  );
+
+  // ── Root grant: root voor de default vscode-user (vervangt de noot-flow) ────
+  app.get('/api/authz/root-grants', async () => getAllRootGrants());
+
+  app.get<{ Params: { container: string } }>(
+    '/api/authz/root-grants/:container',
+    async (req) => rootGrantStatus(req.params.container) ?? { until: 0, permanent: false },
+  );
+
+  app.put<{ Params: { container: string }; Body: { minutes?: number; permanent?: boolean } }>(
+    '/api/authz/root-grants/:container',
+    async (req, reply) => {
+      const { container } = req.params;
+      const { minutes, permanent } = req.body ?? {};
+      if (!permanent && (!minutes || minutes < 1 || minutes > 120)) {
+        return reply.code(400).send({ error: 'minutes must be 1-120 (or set permanent:true)' });
+      }
+      try {
+        const until = await applyRootGrant(container, minutes ?? null, permanent === true);
+        logAudit({ containerId: container, domain: 'docker-access', action: `admin:root-grant-${permanent ? 'permanent' : `${minutes}m`}` });
+        notifyStateChanged();
+        return { container, until, permanent: isPermanentUntil(until) };
+      } catch (err: any) {
+        return reply.code(502).send({ error: `could not apply root grant: ${err.message}` });
+      }
+    }
+  );
+
+  app.delete<{ Params: { container: string } }>(
+    '/api/authz/root-grants/:container',
+    async (req) => {
+      const { container } = req.params;
+      await revokeRootGrant(container);
+      logAudit({ containerId: container, domain: 'docker-access', action: 'admin:root-grant-revoke' });
       notifyStateChanged();
       return { ok: true };
     }
