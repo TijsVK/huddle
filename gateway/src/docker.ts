@@ -962,6 +962,9 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
     'NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/huddle-ca.crt',
     'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt',
     'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt',
+    // pip ships its own certifi bundle and ignores SSL_CERT_FILE/REQUESTS_CA_BUNDLE;
+    // PIP_CERT points it at the system bundle (which includes the Huddle CA).
+    'PIP_CERT=/etc/ssl/certs/ca-certificates.crt',
     // DOCKER_HOST wijst naar de docker-socket. Klassiek: de socket-proxy in de
     // gemounte directory /var/run/huddle. DinD: de private-daemon-socket in de
     // gedeelde volume /var/run/dind. Het config-script legt in beide gevallen ook

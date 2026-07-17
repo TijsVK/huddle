@@ -93,7 +93,19 @@ the filtering socket-proxy.
 - [x] Removed orphaned credentials endpoint (noot fully retired)
 - [x] Commit incrementally; pushed to TijsVK fork
 
-## STATUS: core complete + FULL E2E PASS.
+## STATUS (rolling): broad workflow coverage + seamless migration + 6 bugs fixed.
+Battery runner: `gateway/test/dind-compat/battery.sh` (all harness tools + real-
+gateway E2Es → docs/dind/RESULTS.md). Coverage now: compose, testcontainers,
+buildx, privileged, k3d, localstack, act, devcontainer-cli, workspace, isolation,
+kafka, compose-build, registry, resources, multidb, rabbitmq, webdev, playwright,
+egress, + real-gateway E2Es: aspire-sqlserver, nested-egress, toolchain-ca
+(git/go/rust/pip/maven), restart, migrate. Bugs found+fixed: proxy-crash,
+socket-perms, sidecar-CA, sudo-env, cgroup-delegation, (pip-CA env). Migration
+(classic↔DinD) is E2E-verified + `huddle migrate`.
+Next backlog: Java Testcontainers, kind image-load+Ingress, helm-on-k3d, dagger/
+skaffold/tilt. See TEST-BACKLOG.md.
+
+## (earlier milestone) core complete + FULL E2E PASS.
 212 gateway tests green; gateway+cli typecheck; Angular build passes; 11/11
 tool-compat tests pass; and the full real-gateway Aspire+SqlServer E2E passes
 (rc=0): huddle init (DinD) → real devcontainer → Aspire AppHost w/ SqlServer →
