@@ -998,8 +998,15 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
   // devcontainer deelt. Vóór het config-script zodat dockerd zijn netwerk-
   // iptables kan opzetten voordat het script de egress-DNAT/DROP-regels toevoegt.
   if (DIND_ENABLED) {
+    // Geef de sidecar dezelfde workspace/folder-mounts (zelfde targets) zodat
+    // tools die deze paden in geneste containers bind-mounten de echte bestanden
+    // zien — de private daemon heeft immers een eigen filesystem.
+    const sharedMounts = [
+      ...folderMounts,
+      ...(empty ? [] : [{ Type: 'bind' as const, Source: effectiveSource, Target: containerWorkspace }]),
+    ];
     try {
-      await createDindSidecar(containerName, id);
+      await createDindSidecar(containerName, id, sharedMounts);
     } catch (err: any) {
       console.error(`[dind] sidecar for ${containerName} failed to start:`, err.message);
     }

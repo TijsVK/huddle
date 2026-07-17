@@ -89,9 +89,24 @@ export async function ensureDindSockVolume(containerName: string): Promise<void>
 // dus de client-config gebruikt het OPGELOSTE huddle-IP. Zie het config-script
 // in docker.ts (buildDindClientProxyConfig).
 
+export interface SidecarMount { Type: 'bind' | 'volume'; Source: string; Target: string; ReadOnly?: boolean; }
+
 // Maak (of herstart) de DinD-sidecar voor een devcontainer. De devcontainer moet
 // al draaien: de sidecar deelt zijn netwerk-namespace via container:<id>.
-export async function createDindSidecar(containerName: string, devcontainerId: string): Promise<string> {
+//
+// `sharedMounts` zijn de mounts (workspace + folder-mappings) die de devcontainer
+// óók heeft, op HETZELFDE doelpad. Cruciaal: de private daemon heeft een eigen
+// filesystem, dus een tool dat vanuit de devcontainer een pad (bv. de workspace)
+// in een geneste container bind-mount, laat de daemon dat pad in ZIJN fs zoeken.
+// Zonder deze gedeelde mounts maakt Docker dan een leeg pad aan (stille lege
+// mount). Door dezelfde bronnen op dezelfde targets ook in de sidecar te mounten
+// zien geneste containers de echte bestanden. (Bind-mounts van willekeurige
+// devcontainer-lokale paden buiten deze set blijven een beperking — zie docs.)
+export async function createDindSidecar(
+  containerName: string,
+  devcontainerId: string,
+  sharedMounts: SidecarMount[] = [],
+): Promise<string> {
   const name = dindContainerName(containerName);
 
   // Bestaande sidecar opruimen (herstart-scenario / re-create).
@@ -137,6 +152,10 @@ export async function createDindSidecar(containerName: string, devcontainerId: s
       Mounts: [
         { Type: 'volume', Source: dindSockVolume(containerName), Target: DIND_SOCKET_MOUNT },
         { Type: 'volume', Source: dindDataVolume(containerName), Target: '/var/lib/docker' },
+        // Dezelfde workspace/folder-mounts als de devcontainer, op hetzelfde
+        // doelpad, zodat bind-mounts van die paden in geneste containers de echte
+        // bestanden zien (de daemon heeft een eigen fs).
+        ...sharedMounts,
       ],
       // Overleeft een Huddle-herstart: de devcontainer (en dus de netns) blijft
       // bestaan, dus de sidecar kan gewoon weer opstarten.
@@ -165,6 +184,24 @@ export async function removeDindSidecar(containerName: string): Promise<void> {
   }
 }
 
+// Leid de te delen mounts (workspace + folder-mappings) af uit de devcontainer
+// zelf, zodat een herstel-recreate dezelfde targets krijgt. Sluit de dind-socket-
+// mount uit (die voegt createDindSidecar zelf toe).
+async function sharedMountsFromDevcontainer(devcontainerId: string): Promise<SidecarMount[]> {
+  try {
+    const info = await dockerRequest('GET', `/containers/${encodeURIComponent(devcontainerId)}/json`);
+    const mounts: any[] = info?.Mounts ?? [];
+    const out: SidecarMount[] = [];
+    for (const m of mounts) {
+      const target: string = m.Destination ?? '';
+      if (!target || target === DIND_SOCKET_MOUNT) continue;
+      if (m.Type === 'bind') out.push({ Type: 'bind', Source: m.Source, Target: target, ReadOnly: m.RW === false });
+      else if (m.Type === 'volume' && m.Name) out.push({ Type: 'volume', Source: m.Name, Target: target, ReadOnly: m.RW === false });
+    }
+    return out;
+  } catch { return []; }
+}
+
 // Bij Huddle-herstart: zorg dat de sidecar draait voor een bestaande
 // devcontainer (start indien gestopt, maak opnieuw indien weg).
 export async function ensureDindSidecar(containerName: string, devcontainerId: string): Promise<void> {
@@ -175,6 +212,7 @@ export async function ensureDindSidecar(containerName: string, devcontainerId: s
     await dockerRequest('POST', `/containers/${encodeURIComponent(name)}/start`, {});
     console.log(`[dind] sidecar ${name} restarted`);
   } catch {
-    await createDindSidecar(containerName, devcontainerId);
+    const shared = await sharedMountsFromDevcontainer(devcontainerId);
+    await createDindSidecar(containerName, devcontainerId, shared);
   }
 }
