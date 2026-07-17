@@ -677,6 +677,11 @@ ${seedScript}
 mkdir -p /etc/sudoers.d
 printf 'Defaults logfile=/tmp/sudo-audit.log\\n' > /etc/sudoers.d/99-huddle-audit
 chmod 440 /etc/sudoers.d/99-huddle-audit 2>/dev/null || true
+# sudo reset standaard de omgeving (env_reset), waardoor \`sudo apt-get\`/pip/enz.
+# de Huddle proxy- en CA-env verliezen en geen netwerk hebben. Bewaar die vars zodat
+# root-commando's via de proxy blijven werken (relevant met de root-grant).
+printf 'Defaults env_keep += "http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY NODE_EXTRA_CA_CERTS SSL_CERT_FILE REQUESTS_CA_BUNDLE"\\n' > /etc/sudoers.d/99-huddle-env
+chmod 440 /etc/sudoers.d/99-huddle-env 2>/dev/null || true
 
 # Start sudo log forwarder (posts new lines to Huddle API via the proxy)
 touch /tmp/sudo-audit.log
@@ -793,6 +798,11 @@ chown -R vscode:vscode /home/vscode/.vscode-server /home/vscode/.vscode-server-i
 mkdir -p /etc/sudoers.d
 printf 'Defaults logfile=/tmp/sudo-audit.log\\n' > /etc/sudoers.d/99-huddle-audit
 chmod 440 /etc/sudoers.d/99-huddle-audit 2>/dev/null || true
+# sudo reset standaard de omgeving (env_reset), waardoor \`sudo apt-get\`/pip/enz.
+# de Huddle proxy- en CA-env verliezen en geen netwerk hebben. Bewaar die vars zodat
+# root-commando's via de proxy blijven werken (relevant met de root-grant).
+printf 'Defaults env_keep += "http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY NODE_EXTRA_CA_CERTS SSL_CERT_FILE REQUESTS_CA_BUNDLE"\\n' > /etc/sudoers.d/99-huddle-env
+chmod 440 /etc/sudoers.d/99-huddle-env 2>/dev/null || true
 
 # Start sudo log forwarder (posts new lines to Huddle API via the proxy)
 touch /tmp/sudo-audit.log
