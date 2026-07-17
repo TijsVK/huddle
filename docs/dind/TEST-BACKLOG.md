@@ -25,16 +25,14 @@ Ranked by likelihood of exposing a real bug. ✅ = now covered, ⬜ = todo,
   container-only repro.
 
 ## Tier 2 — realistic, moderate risk
-- ⬜ compose with a **`build:` context from the workspace** (build an image from a
-  repo Dockerfile) — exercises the workspace→sidecar bridge for build contexts.
-- ⬜ **Restart resilience** — restart huddle + the devcontainer mid-workload; confirm
-  sidecar + root-grant + network restore (code exists, never E2E'd).
-- ⬜ **Local registry** (`registry:2`) build→push→pull (push was socket-proxy-blocked).
-- ⬜ **Resource limits** on nested containers (`--memory/--cpus`) actually enforce
-  (a cgroup-v2 delegation warning was seen in the Aspire run).
-- ⬜ Playwright (browser download + headless HTTPS via MITM), Java Testcontainers
-  (Ryuk + copyFileToContainer), kind `load docker-image` + Ingress,
-  Skaffold/Tilt/dagger dev loops.
+- ✅ compose `build:` context from the workspace — `tools/compose-build.sh`.
+- ✅ Restart resilience — `e2e-restart.sh` (egress/daemon/root-grant/sidecar restored).
+- ✅ Local registry build→push→pull — `tools/registry.sh`.
+- ✅ Resource limits on nested containers — `tools/resources.sh` (fixed cgroup-v2 delegation).
+- ✅ Playwright — `tools/playwright.sh`. ✅ multi-DB, RabbitMQ, web/HMR websockets.
+- ✅ **Migration** classic↔DinD — `e2e-migrate.sh` (+ `huddle migrate`).
+- ⬜ Java Testcontainers (Ryuk + copyFileToContainer), kind `load docker-image` +
+  Ingress, Skaffold/Tilt/dagger dev loops, helm-on-k3d, pip/maven/gradle CA.
 
 ## Can't run in this environment — matrix gaps to flag
 - ⬜ **Real IDE attach** (JetBrains Gateway / VS Code Remote) — the actual user flow,

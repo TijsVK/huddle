@@ -97,6 +97,28 @@ harness (`tools/workspace.sh`).
   stateful in the container, expiry triggers an **active revoke** (`root-grant.ts`
   timer); startup restores/expires grants.
 
+## Migration (classic ↔ DinD)
+
+Switching `HUDDLE_DIND` changes a devcontainer's docker plumbing (socket-proxy ↔
+private daemon), which only takes effect on **recreate**. Migration is designed to
+feel seamless — same capabilities and UX afterwards:
+
+- **New devcontainers** pick up the current mode automatically.
+- **Existing devcontainers**: `huddle migrate <name>` (or `huddle migrate` for all,
+  or `POST /api/docker/containers/:name/migrate`) recreates them in the current
+  mode from their own labels. It's a forced recreate, but:
+  - the **workspace** is preserved (git worktree / bind mount is reused);
+  - **portal state** — grants, firewall rules, action policies, approved ports —
+    is keyed by container name in SQLite and survives untouched;
+  - only ephemeral in-container state is lost.
+- On startup the gateway logs a **non-destructive hint** listing devcontainers
+  still in the other mode (`needsMigration()`), so nothing changes until the
+  operator chooses to migrate.
+
+E2E-verified: a classic devcontainer + a firewall rule → switch the gateway to
+DinD → the rule persists → `migrate` → the devcontainer runs on a private daemon
+with docker fully working (`gateway/test/dind-compat/e2e-migrate.sh`).
+
 ## Code map
 
 | File | Role |

@@ -32,6 +32,22 @@ the real Huddle constraint (internal network, all egress via a forward proxy).
 | nested runtime egress | ⚠️ boundary | nested-container HTTPS **routes through the proxy**; CA trust not auto-injected into nested containers (mount the CA / set `SSL_CERT_FILE`) — expected, matches Docker Desktop behind a corporate MITM |
 | Kafka (Testcontainers) | ✅ pass | create topic + produce + consume via the **advertised listener** (mapped port on the devcontainer's localhost, shared netns) |
 | toolchain CA matrix | ✅ pass | git / `go mod` / rustup / `cargo fetch` all work through the MITM (system trust store). Surfaced+fixed: **sudo dropped the proxy/CA env** → `sudo apt-get` had no network; fixed with a sudoers `env_keep` drop-in |
+| multi-DB (compose) | ✅ pass | Postgres + MySQL + MongoDB health-gated, each answers a query |
+| RabbitMQ | ✅ pass | AMQP publish + consume over localhost:5672 (shared netns) |
+| web dev / HMR | ✅ pass | dev-server HTTP + **WebSocket round-trip** over a mapped port on localhost |
+| Playwright | ✅ pass | headless Chromium download + drives a page served by a nested container |
+| compose build-context | ✅ pass | `compose up --build` builds from a workspace Dockerfile (shared into the daemon) and serves the built file |
+| local registry | ✅ pass | build → push → pull → run round-trip to a nested `registry:2` |
+| resource limits | ✅ pass | `--memory` / `--cpus` / `--pids-limit` enforced on nested containers (cgroup-v2 delegation) |
+| restart resilience | ✅ pass | after a gateway restart: egress restored (dc-net rejoin + iptables refresh), private daemon reachable, root grant persists, sidecar running |
+| **migration** classic→DinD | ✅ pass | classic devcontainer + firewall rule → switch gateway to DinD → rule preserved → `migrate` → private daemon, docker fully works |
+
+### Bugs found and fixed during testing
+1. Gateway crash on a malformed proxied path (`ERR_UNESCAPED_CHARACTERS`) — took the whole gateway down.
+2. Private-daemon socket root-only → non-root user (Aspire) got permission denied → DCP marked runtime unhealthy.
+3. Sidecar dockerd didn't trust the Huddle MITM CA → image pulls failed `x509: unknown authority`.
+4. `sudo` reset the environment → `sudo apt-get`/pip had no proxy/CA → no network.
+5. cgroup-v2 controllers not delegated (bypassed `dockerd-entrypoint.sh`) → nested `--memory`/`--cpus` not enforced.
 
 ## Full end-to-end (real gateway, not the harness stand-in)
 
