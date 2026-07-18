@@ -201,7 +201,12 @@ export async function createDindSidecar(
     // which the gateway serves (bind-mounted in).
     `dockerd --host=unix://${DIND_SOCKET_PATH} --authorization-plugin=${AUTHZ_PLUGIN_NAME} --mtu=1400 & DPID=$!; ` +
     `i=0; while [ ! -S ${DIND_SOCKET_PATH} ] && [ $i -lt 240 ]; do sleep 0.5; i=$((i+1)); done; ` +
-    `chmod 0666 ${DIND_SOCKET_PATH} 2>/dev/null || true; wait $DPID`,
+    // Keep the socket world-accessible: the non-root devcontainer user (vscode,
+    // not in the docker group) connects to it. A one-shot chmod races socket
+    // re-creation (dockerd restart) and intermittently leaves it 0660 root:docker
+    // → "permission denied". A cheap background loop keeps it 0666.
+    `chmod 0666 ${DIND_SOCKET_PATH} 2>/dev/null || true; ` +
+    `(while true; do chmod 0666 ${DIND_SOCKET_PATH} 2>/dev/null; sleep 2; done) & wait $DPID`,
   ];
 
   const createBody = {
