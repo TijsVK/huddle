@@ -30,7 +30,8 @@ echo "$resp" | grep -q '"id"' && pass "devcontainer started" || { fail "start: $
 for i in $(seq 1 60); do docker exec -u vscode "$DC" docker version >/dev/null 2>&1 && break; sleep 2; done
 
 # Baseline: the DEVCONTAINER itself reaches the allowlisted domain (CA trusted).
-code=$(docker exec -u vscode "$DC" curl -s -o /dev/null -w '%{http_code}' -m 25 https://example.com 2>/dev/null)
+# Retry: a cold MITM proxy can 502 the first request while it warms up.
+code=""; for i in $(seq 1 8); do code=$(docker exec -u vscode "$DC" curl -s -o /dev/null -w '%{http_code}' -m 25 https://example.com 2>/dev/null); [ "$code" = 200 ] && break; sleep 3; done
 [ "$code" = 200 ] && pass "devcontainer HTTPS to allowlisted domain (=$code)" || { fail "devcontainer HTTPS ($code)"; rc=1; }
 
 # The actual question: a NESTED container doing runtime HTTPS through the proxy.

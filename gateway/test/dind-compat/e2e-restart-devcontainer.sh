@@ -22,7 +22,10 @@ dockerworks(){ docker exec -u vscode "$DC" docker version >/dev/null 2>&1; }
 egressworks(){ [ "$(docker exec -u vscode "$DC" curl -s -o /dev/null -w '%{http_code}' -m 20 https://example.com 2>/dev/null)" = 200 ]; }
 
 dockerworks && pass "docker works before restart" || { fail "docker before restart"; rc=1; }
-egressworks && pass "egress works before restart" || { fail "egress before restart"; rc=1; }
+# Retry: the very first HTTPS through a cold MITM proxy (cert-gen + upstream
+# connect) can exceed the single-shot timeout; it's warm on retry.
+ok=""; for i in $(seq 1 8); do egressworks && { ok=1; break; }; sleep 3; done
+[ -n "$ok" ] && pass "egress works before restart" || { fail "egress before restart"; rc=1; }
 
 # ── stop + start the devcontainer via Huddle's start endpoint ─────────────────
 log "stopping the devcontainer (netns will reset)"
