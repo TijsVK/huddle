@@ -7,6 +7,7 @@ NAME=res
 NET="${1:-bridge}"
 rc=0
 up "$NAME" "$NET" || exit 1
+dcsh "$NAME" 'docker pull -q alpine:3.20 >/dev/null 2>&1' >/dev/null 2>&1
 
 mem=$(dcsh "$NAME" 'docker run --rm --memory=64m alpine:3.20 sh -c "cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null"' 2>/dev/null | tr -d '[:space:]')
 [ "$mem" = "67108864" ] && pass "$NAME: --memory=64m enforced on nested container (memory.max=$mem)" || { fail "$NAME: memory limit not enforced (got '$mem')"; rc=1; }

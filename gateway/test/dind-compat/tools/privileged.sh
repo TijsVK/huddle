@@ -8,6 +8,9 @@ NET="${1:-bridge}"
 rc=0
 up "$NAME" "$NET" || exit 1
 
+# Pre-pull so the first assertion doesn't race the image fetch in the fresh daemon.
+dcsh "$NAME" 'docker pull -q alpine:3.20 >/dev/null 2>&1' >/dev/null 2>&1
+
 # 1. Privileged nested container doing something that needs CAP_SYS_ADMIN.
 out=$(dcsh "$NAME" 'docker run --privileged --rm alpine:3.20 sh -c "mount -t tmpfs none /mnt && echo PRIV_OK"' 2>/dev/null | tr -d "\r")
 assert_contains "$out" "PRIV_OK" "$NAME: --privileged nested container (mount tmpfs)" || rc=1
