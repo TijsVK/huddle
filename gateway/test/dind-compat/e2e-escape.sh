@@ -24,8 +24,13 @@ done
 curl -s -H "$AUTH" -H 'content-type: application/json' -X POST "$API/api/docker/start" -d "{\"imageName\":\"huddle-e2e-base:latest\",\"containerName\":\"$DC\",\"ideName\":\"vscode\",\"empty\":true}" >/dev/null
 for i in $(seq 1 60); do docker exec -u vscode "$DC" docker version >/dev/null 2>&1 && break; sleep 2; done
 # Pre-pull alpine and CONFIRM it's present, so a later failed run = policy-denied,
-# not image-missing.
-docker exec -u vscode "$DC" docker pull -q alpine:3.20 >/dev/null 2>&1
+# not image-missing. Retry: Docker Hub via the MITM proxy can be slow on a cold
+# start (transient), which would otherwise read as "not pullable".
+for i in $(seq 1 6); do
+  docker exec -u vscode "$DC" docker pull -q alpine:3.20 >/dev/null 2>&1
+  docker exec -u vscode "$DC" docker image inspect alpine:3.20 >/dev/null 2>&1 && break
+  sleep 5
+done
 if ! docker exec -u vscode "$DC" docker image inspect alpine:3.20 >/dev/null 2>&1; then
   fail "setup: alpine not pullable (Docker Hub not reachable) — test inconclusive"; exit 1
 fi
