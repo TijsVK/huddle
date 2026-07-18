@@ -45,10 +45,17 @@ function normalizePath(rawPath: string): string {
   return rawPath.replace(/^\/v[\d.]+/, '').split('?')[0];
 }
 
-// Does this request turn the connection into a raw hijacked stream? Interactive
-// exec-start (Detach!=true) and container attach both do; after them the bytes on
-// the wire are no longer HTTP and must be tunnelled verbatim.
-function isHijack(method: string, p: string, body: Buffer): boolean {
+// Does this request turn the connection into a raw hijacked/upgraded stream?
+// After it the bytes on the wire are no longer HTTP/1 and must be tunnelled
+// verbatim. Covers: interactive exec-start (Detach!=true), container attach, the
+// BuildKit control endpoint `/grpc` (h2c upgrade — the DEFAULT `docker build`
+// path), and generally any request carrying an `Upgrade:` header (websockets,
+// future upgrades). Missing any of these makes the filter misparse the post-
+// upgrade frames as new HTTP requests and the connection dies with EOF.
+function isHijack(method: string, p: string, body: Buffer, headerText: string): boolean {
+  if (/^upgrade:/im.test(headerText)) return true;
+  if (/^connection:\s*.*\bupgrade\b/im.test(headerText)) return true;
+  if (p === '/grpc' || p === '/session') return true;
   if (method === 'POST' && /^\/exec\/[^/]+\/start$/.test(p)) {
     try {
       const j = JSON.parse(body.toString() || '{}');
@@ -74,8 +81,19 @@ export function createDindFilter(containerName: string, filterSockPath: string, 
     // output is silently dropped (empty result, exit 0).
     const server = net.createServer({ allowHalfOpen: true }, (client) => {
       const upstream = net.createConnection({ path: upstreamSockPath, allowHalfOpen: true });
-      let buf = Buffer.alloc(0);
-      let raw = false;        // hijacked → tunnel verbatim, stop parsing
+      // 'parse'       — parsing client requests; upstream responses pipe through.
+      // 'awaitHijack' — forwarded a hijack CANDIDATE; watching its response to
+      //                 confirm (101 / docker raw-stream) before going raw. This
+      //                 is the safety hinge: a create can never reach the daemon
+      //                 uninspected, because we only stop parsing once the daemon
+      //                 has actually switched protocols (and then it no longer
+      //                 interprets bytes as container-create calls).
+      // 'raw'         — confirmed hijack; tunnel both directions verbatim.
+      let mode: 'parse' | 'awaitHijack' | 'raw' = 'parse';
+      let buf = Buffer.alloc(0);          // unparsed client bytes (parse mode)
+      let pendingClient = Buffer.alloc(0); // client bytes held during awaitHijack
+      let respBuf = Buffer.alloc(0);       // upstream bytes buffered during awaitHijack
+      let clientEnded = false;
       let closed = false;
 
       function destroy(): void {
@@ -87,17 +105,51 @@ export function createDindFilter(containerName: string, filterSockPath: string, 
 
       upstream.on('error', destroy);
       client.on('error', destroy);
-      // Forward half-close (FIN) rather than tearing down, so the peer can still
-      // flush its remaining direction (e.g. exec output after stdin-EOF).
-      client.on('end', () => { try { upstream.end(); } catch {} });
       upstream.on('end', () => { try { client.end(); } catch {} });
+      // Forward half-close (stdin-EOF) so the daemon-side process finishes, but
+      // keep both sides readable (allowHalfOpen) so exec output still flows back.
+      client.on('end', () => {
+        clientEnded = true;
+        if (mode !== 'awaitHijack') { try { upstream.end(); } catch {} }
+      });
 
-      // Responses (and hijacked upstream→client bytes) always flow straight back.
-      upstream.pipe(client);
+      // Decide, from the buffered upstream response headers, whether the candidate
+      // actually hijacked. Returns 'yes' | 'no' | 'need-more'.
+      function hijackVerdict(): 'yes' | 'no' | 'need-more' {
+        const end = respBuf.indexOf(CRLF2);
+        if (end === -1) return respBuf.length > 65536 ? 'no' : 'need-more';
+        const head = respBuf.slice(0, end).toString('latin1');
+        const status = head.split('\r\n')[0] ?? '';
+        if (/\b101\b/.test(status)) return 'yes';                 // Switching Protocols
+        const ct = headerValue(head, 'content-type') ?? '';
+        if (/vnd\.docker\.(raw|multiplexed)-stream/i.test(ct)) return 'yes'; // exec/attach
+        return 'no';
+      }
+
+      upstream.on('data', (chunk: Buffer) => {
+        if (mode !== 'awaitHijack') { client.write(chunk); return; }
+        respBuf = Buffer.concat([respBuf, chunk]);
+        const verdict = hijackVerdict();
+        if (verdict === 'need-more') return;
+        // Flush what we buffered of the response to the client either way.
+        client.write(respBuf);
+        respBuf = Buffer.alloc(0);
+        if (verdict === 'yes') {
+          mode = 'raw';
+          if (pendingClient.length) { upstream.write(pendingClient); pendingClient = Buffer.alloc(0); }
+          if (clientEnded) { try { upstream.end(); } catch {} }
+        } else {
+          // Not a hijack: resume normal request parsing on the held client bytes.
+          mode = 'parse';
+          buf = pendingClient; pendingClient = Buffer.alloc(0);
+          pump();
+          if (clientEnded) { try { upstream.end(); } catch {} }
+        }
+      });
 
       // Parse as many complete requests out of `buf` as possible, forwarding each.
       function pump(): void {
-        while (!raw && buf.length > 0) {
+        while (mode === 'parse' && buf.length > 0) {
           const hdrEnd = buf.indexOf(CRLF2);
           if (hdrEnd === -1) return; // headers incomplete — wait for more
           const headerText = buf.slice(0, hdrEnd).toString('latin1');
@@ -137,23 +189,27 @@ export function createDindFilter(containerName: string, filterSockPath: string, 
             if (denial) { deny403(client, denial); destroy(); return; }
           }
 
-          // Forward the request unmodified.
           if (process.env.HUDDLE_DIND_FILTER_DEBUG) {
-            console.error(`[dind-filter dbg] ${method} ${p} bodyLen=${bodyBytes.length} hijack=${isHijack(method, p, bodyBytes)}`);
+            console.error(`[dind-filter dbg] ${method} ${p} bodyLen=${bodyBytes.length} candidate=${isHijack(method, p, bodyBytes, headerText)}`);
           }
           upstream.write(reqBytes);
           buf = buf.slice(bodyEnd);
 
-          if (isHijack(method, p, bodyBytes)) {
-            raw = true;
-            if (buf.length > 0) { upstream.write(buf); buf = Buffer.alloc(0); }
+          if (isHijack(method, p, bodyBytes, headerText)) {
+            // Don't go raw yet — hold remaining client bytes and confirm from the
+            // response. A create pipelined after the candidate stays UNforwarded
+            // (in pendingClient) until we know the daemon hijacked; if it didn't,
+            // pump() re-parses and re-inspects it.
+            mode = 'awaitHijack';
+            pendingClient = buf; buf = Buffer.alloc(0);
             return;
           }
         }
       }
 
       client.on('data', (chunk: Buffer) => {
-        if (raw) { upstream.write(chunk); return; }
+        if (mode === 'raw') { upstream.write(chunk); return; }
+        if (mode === 'awaitHijack') { pendingClient = Buffer.concat([pendingClient, chunk]); return; }
         buf = Buffer.concat([buf, chunk]);
         pump();
       });

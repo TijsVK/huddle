@@ -64,13 +64,21 @@ function fakeUpstream(sockPath: string): Promise<{ server: net.Server; received:
           const body = JSON.stringify({ Id: 'newcontainer' });
           sock.write(`HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n${body}`);
           sock.end();
+        } else if (/POST \/(v[\d.]+\/)?exec\/bogus\/start/.test(text)) {
+          handled = true;
+          // A non-existent exec id: the daemon does NOT hijack, it 404s.
+          const b = JSON.stringify({ message: 'no such exec' });
+          sock.write(`HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: ${b.length}\r\n\r\n${b}`);
         } else if (/POST \/(v[\d.]+\/)?exec\/[^/]+\/start/.test(text)) {
           handled = true;
-          // Emulate hijack: only emit output AFTER the client half-closes.
-          sock.on('end', () => {
-            sock.write('HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\nEXEC-OUTPUT-OK');
-            sock.end();
-          });
+          // Emulate docker's hijack: send the raw-stream 200 immediately, then
+          // stream output once the client half-closes its write side (stdin-EOF).
+          sock.write('HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n');
+          sock.on('end', () => { sock.write('EXEC-OUTPUT-OK'); sock.end(); });
+        } else if (/POST \/(v[\d.]+\/)?grpc/.test(text)) {
+          handled = true;
+          sock.write('HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\nGRPC-FRAMES');
+          sock.end();
         } else if (text.includes('\r\n\r\n')) {
           handled = true;
           sock.write('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi');
@@ -170,6 +178,31 @@ describe('dind-filter', () => {
       `POST /v1.45/containers/create HTTP/1.1\r\nHost: d\r\nContent-Length: ${create.length}\r\n\r\n${create}`;
     const resp = await talk(filterSock, payload);
     expect(resp).toContain('403 Forbidden');
+    expect(up.received()).not.toContain('/containers/create');
+  });
+
+  // BuildKit's default builder upgrades /grpc to h2c; the filter must raw-tunnel
+  // the post-101 frames instead of misparsing them as HTTP (which killed builds
+  // with "error reading from server: EOF").
+  it('raw-tunnels a /grpc upgrade (101) so BuildKit frames survive', async () => {
+    const resp = await talk(filterSock, `POST /v1.45/grpc HTTP/1.1\r\nHost: d\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n`, true);
+    expect(resp).toContain('101');
+    expect(resp).toContain('GRPC-FRAMES');
+  });
+
+  // SECURITY: a hijack CANDIDATE that the daemon does NOT actually hijack (bogus
+  // exec id → 404) must fall back to request parsing, so a privileged create
+  // pipelined right after it is still inspected and denied — never raw-tunnelled
+  // uninspected to the daemon.
+  it('does not let a non-hijacking candidate smuggle a pipelined privileged create', async () => {
+    const start = JSON.stringify({ Detach: false });
+    const create = JSON.stringify({ Image: 'alpine', HostConfig: { Privileged: true } });
+    const payload =
+      `POST /v1.45/exec/bogus/start HTTP/1.1\r\nHost: d\r\nContent-Length: ${start.length}\r\n\r\n${start}` +
+      `POST /v1.45/containers/create HTTP/1.1\r\nHost: d\r\nContent-Length: ${create.length}\r\n\r\n${create}`;
+    const resp = await talk(filterSock, payload);
+    expect(resp).toContain('404');           // the bogus exec response passes through
+    expect(resp).toContain('403 Forbidden'); // the smuggled create is still denied
     expect(up.received()).not.toContain('/containers/create');
   });
 });
