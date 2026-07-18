@@ -112,7 +112,11 @@ if docker exec -u vscode "$DC" bash -lc 'cd ~/apphost && ASPIRE_ALLOW_UNSECURED_
 else fail "nuget restore (see log)"; tail -15 /tmp/e2e-restore.log >&2; rc=1; fi
 
 log "dotnet run (AppHost) — DCP creates the SqlServer container"
-docker exec -u vscode "$DC" bash -lc 'cd ~/apphost && setsid bash -c "ASPIRE_ALLOW_UNSECURED_TRANSPORT=true dotnet run --project AppHost.csproj > \$HOME/apphost/run.log 2>&1" </dev/null >/dev/null 2>&1 &' >/dev/null 2>&1
+# NOTE: ASPIRE_ALLOW_UNSECURED_TRANSPORT is injected into the devcontainer env by
+# the gateway (docker.ts), so we deliberately do NOT set it here — the run below
+# must inherit it and use plain-http internal transport. Otherwise the dashboard's
+# resource-service gRPC would fail with UntrustedRoot (the dev-cert TLS trust bug).
+docker exec -u vscode "$DC" bash -lc 'cd ~/apphost && setsid bash -c "dotnet run --project AppHost.csproj > \$HOME/apphost/run.log 2>&1" </dev/null >/dev/null 2>&1 &' >/dev/null 2>&1
 
 # ── 5. confirm the SqlServer container comes up in the private daemon ─────────
 log "waiting for the SqlServer container (image ~1.7GB pulled through the proxy)"
@@ -139,6 +143,11 @@ fi
 runlog=$(docker exec -u vscode "$DC" cat /home/vscode/apphost/run.log 2>/dev/null)
 echo "$runlog" | grep -qi "not owned by this devcontainer" && { fail "issue #61 ownership error present"; rc=1; } || pass "no 'not owned by this devcontainer' error (#61)"
 echo "$runlog" | grep -qiE "403|CopyFile.*non-zero" && { fail "issue #12 error present"; rc=1; } || pass "no 403 / CopyFile error (#12)"
+# Dashboard/OTLP must be plain http (ASPIRE_ALLOW_UNSECURED_TRANSPORT injected by
+# the gateway env) so the resource-service gRPC doesn't fail on the untrusted dev
+# cert — the "grpc errors on the dashboard" / Blazor "circuit terminated" bug.
+echo "$runlog" | grep -qE "Dashboard:  http://" && pass "dashboard on plain http (ASPIRE_ALLOW_UNSECURED_TRANSPORT inherited from env)" || { fail "dashboard not http — unsecured-transport env not inherited"; rc=1; }
+echo "$runlog" | grep -qiE "UntrustedRoot|RpcException.*SSL" && { fail "dashboard gRPC UntrustedRoot present (dev-cert TLS regression)"; rc=1; } || pass "no dashboard gRPC UntrustedRoot / cert errors"
 
 [ -z "$running" ] && { rc=1; log "--- AppHost log tail ---"; echo "$runlog" | tail -30 >&2; log "--- sidecar log tail ---"; docker logs "dind-$DC" 2>&1 | tail -15 >&2; }
 

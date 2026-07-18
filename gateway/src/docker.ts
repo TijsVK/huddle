@@ -965,6 +965,13 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
     // pip ships its own certifi bundle and ignores SSL_CERT_FILE/REQUESTS_CA_BUNDLE;
     // PIP_CERT points it at the system bundle (which includes the Huddle CA).
     'PIP_CERT=/etc/ssl/certs/ca-certificates.crt',
+    // .NET Aspire runs its dashboard + resource-service + OTLP over HTTPS with a
+    // self-signed ASP.NET dev cert. In a devcontainer that cert isn't trusted, so
+    // the dashboard's resource-service gRPC fails with `UntrustedRoot` ("grpc
+    // errors on the dashboard" / Blazor "circuit terminated"). Allow unsecured
+    // (http) transport for these LOCAL endpoints — they only bind loopback, so
+    // there's no confidentiality loss — which sidesteps the dev-cert trust problem.
+    'ASPIRE_ALLOW_UNSECURED_TRANSPORT=true',
     // DOCKER_HOST wijst naar de docker-socket. Klassiek: de socket-proxy in de
     // gemounte directory /var/run/huddle. DinD: de private-daemon-socket in de
     // gedeelde volume /var/run/dind. Het config-script legt in beide gevallen ook
