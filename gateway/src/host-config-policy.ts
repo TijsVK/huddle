@@ -145,7 +145,10 @@ function normPath(p: string): string {
 // dump (verified live). So deny binds whose source is a host kernel interface (or
 // `/`, which contains them). Ordinary binds (workspace, /etc, docker.sock, …) stay
 // allowed. Review finding #3.
-const SENSITIVE_BIND_ROOTS = ['/proc', '/sys', '/dev'];
+// /proc,/sys,/dev: the privileged sidecar's HOST kernel interfaces.
+// /run/docker/plugins: the authz plugin socket dir (a rw re-bind could otherwise
+// shadow the plugin — defense-in-depth atop the read-only mount, review #3 #3).
+const SENSITIVE_BIND_ROOTS = ['/proc', '/sys', '/dev', '/run/docker/plugins'];
 function bindSourceSensitive(rawSrc: string): boolean {
   if (!rawSrc.startsWith('/')) return false; // named volume / relative
   const p = normPath(rawSrc);
@@ -190,4 +193,19 @@ export function validateDindEscape(hostConfig: any): string | null {
   if (!hostConfig || typeof hostConfig !== 'object') return null;
   const hc = lowerKeysDeep(hostConfig);
   return kernelEscapeLC(hc) ?? dindBindEscape(hc);
+}
+
+// `POST /volumes/create` is a SECOND door to the bind-in-disguise escape (review
+// #3 finding #1): a `local` volume created with `{"Driver":"local","DriverOpts":
+// {"type":"none","o":"bind","device":"/proc/sys"}}` performs the bind at MOUNT
+// time, so a later container-create that references it by NAME carries no
+// sensitive path for the create-time guard to see. Reject the dangerous device at
+// volume-create time. Returns a reason or null.
+export function validateVolumeCreate(body: any): string | null {
+  if (!body || typeof body !== 'object') return null;
+  const b = lowerKeysDeep(body);
+  const dev = b.driveropts?.device;
+  if (typeof dev === 'string' && bindSourceSensitive(dev))
+    return `volume device bind of a host kernel path not permitted: ${dev}`;
+  return null;
 }

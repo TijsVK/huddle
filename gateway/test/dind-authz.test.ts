@@ -86,6 +86,23 @@ describe('dind-authz authorize()', () => {
     expect(authorize(req('POST', '/v1.45/containers/abc123/exec', { Cmd: ['ls'], AttachStdout: true }))).toBeNull();
   });
 
+  // review #3 finding #1: the bind-in-disguise device can be set at volume-create
+  // (then referenced by name), dodging the container-create guard.
+  it('denies a /volumes/create with a device bind of a host kernel path', () => {
+    expect(authorize(req('POST', '/v1.45/volumes/create', { Name: 'evil', Driver: 'local', DriverOpts: { type: 'none', o: 'bind', device: '/proc/sys' } }))).toMatch(/host kernel path/);
+    // case-variant keys too
+    expect(authorize(req('POST', '/v1.45/volumes/create', { driveropts: { DEVICE: '/sys' } }))).toMatch(/host kernel path/);
+  });
+  it('allows a benign /volumes/create', () => {
+    expect(authorize(req('POST', '/v1.45/volumes/create', { Name: 'data' }))).toBeNull();
+    expect(authorize(req('POST', '/v1.45/volumes/create', { Name: 'wsv', Driver: 'local', DriverOpts: { type: 'none', o: 'bind', device: '/home/vscode/d' } }))).toBeNull();
+  });
+  // review #3 finding #2: swarm services are an unchecked container/mount factory.
+  it('denies swarm service create/update', () => {
+    expect(authorize(req('POST', '/v1.45/services/create', { TaskTemplate: {} }))).toMatch(/swarm/);
+    expect(authorize(req('POST', '/v1.45/services/abc/update', {}))).toMatch(/swarm/);
+  });
+
   it('allows non-create/exec requests (version, list, build, grpc)', () => {
     for (const u of ['/v1.45/version', '/v1.45/containers/json', '/v1.45/build', '/v1.45/grpc', '/v1.45/containers/abc/start']) {
       expect(authorize(req('POST', u))).toBeNull();

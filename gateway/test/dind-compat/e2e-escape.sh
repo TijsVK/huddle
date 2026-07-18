@@ -138,6 +138,20 @@ docker exec -u vscode "$DC" docker run --rm --mount 'type=volume,dst=/x,volume-d
 if docker exec -u vscode "$DC" docker run --rm --mount 'type=volume,dst=/x,volume-driver=local,volume-opt=type=none,volume-opt=device=/proc/sys,volume-opt=o=bind' alpine:3.20 true >/dev/null 2>&1; then
   fail "local-volume-driver /proc/sys bind ALLOWED (escape vector open)"; rc=1
 else pass "local-volume-driver /proc/sys bind refused"; fi
+# 5h. Named-volume second door (review#3 #1): create a `local` volume with
+#     device=/proc/sys at volume-create, then reference it by name. The volume
+#     create must be refused so the volume never exists.
+docker exec -u vscode "$DC" docker volume create --driver local --opt type=none --opt o=bind --opt device=/proc/sys evilvol >/dev/null 2>&1
+if docker exec -u vscode "$DC" docker volume inspect evilvol >/dev/null 2>&1; then
+  fail "named volume with device=/proc/sys was created (escape door open)"; rc=1
+  docker exec -u vscode "$DC" docker run --rm -v evilvol:/host alpine:3.20 sh -c 'echo "|nv|" > /host/kernel/core_pattern' >/dev/null 2>&1
+else pass "named local-volume device=/proc/sys refused at volume-create"; fi
+
+# 5i. Swarm service (review#3 #2): an unchecked container/mount factory — refused.
+docker exec -u vscode "$DC" sh -c 'docker swarm init >/dev/null 2>&1' >/dev/null 2>&1
+sw=$(docker exec -u vscode "$DC" docker service create --mount type=bind,source=/proc/sys,target=/host alpine:3.20 true 2>&1 | tr -d '\r')
+printf '%s' "$sw" | grep -qi "denied\|not permitted" && pass "swarm service create refused" || { fail "swarm service create NOT refused ($sw)"; rc=1; }
+
 after=$(cat /proc/sys/kernel/core_pattern 2>/dev/null)
 [ "$before" = "$after" ] && pass "host core_pattern unchanged by nested bind attempts" || { fail "HOST ESCAPE — core_pattern changed ($before -> $after)"; rc=1; }
 

@@ -21,7 +21,7 @@
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
-import { validateDindEscape, validateExecEscape, lowerKeysDeep } from './host-config-policy';
+import { validateDindEscape, validateExecEscape, validateVolumeCreate, lowerKeysDeep } from './host-config-policy';
 
 const authzServers = new Map<string, http.Server>();
 
@@ -67,6 +67,20 @@ export function authorize(req: AuthZReq): string | null {
     const body = decodeBody(req.RequestBody);
     if (body === undefined) return null; // exec without a body can't set Privileged
     return validateExecEscape(body); // lowercases keys internally
+  }
+  // Volume-create: a `local` volume with a device+o=bind option is a bind mount in
+  // disguise whose sensitive path is set HERE, not at container-create (review #3).
+  if (method === 'POST' && uri === '/volumes/create') {
+    const body = decodeBody(req.RequestBody);
+    if (body === undefined) return 'volume create body not available for inspection';
+    return validateVolumeCreate(body);
+  }
+  // Swarm SERVICE create/update is a second container/mount factory: its
+  // TaskTemplate.ContainerSpec carries Mounts + Privileges that never reach the
+  // container-create guard (review #3 finding #2). Swarm mode inside a per-
+  // devcontainer private daemon is not a supported workflow — refuse it wholesale.
+  if (method === 'POST' && (uri === '/services/create' || /^\/services\/[^/]+\/update$/.test(uri))) {
+    return 'swarm services not permitted in DinD';
   }
   return null;
 }
