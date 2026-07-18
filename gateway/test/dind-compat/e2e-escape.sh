@@ -91,13 +91,21 @@ done
 # 5b. Binding docker.sock (the real, authz-guarded socket) into a nested container
 #     IS allowed (Testcontainers Ryuk / docker-outside-of-docker) but stays
 #     guarded: a --privileged create issued THROUGH it must still be refused.
-docker exec -u vscode "$DC" docker pull -q docker:28-cli >/dev/null 2>&1
-dood=$(docker exec -u vscode "$DC" docker run --rm -v /var/run/dind/docker.sock:/var/run/docker.sock docker:28-cli \
-  sh -c 'docker run --rm --privileged alpine:3.20 true 2>&1' | tr -d '\r')
-if printf '%s' "$dood" | grep -qi "denied\|not permitted"; then
-  pass "docker.sock passthrough stays authz-guarded (privileged-through-Ryuk refused)"
+#     Pre-pull docker:28-cli with a retry so a Docker Hub flake doesn't empty $dood.
+for i in $(seq 1 6); do
+  docker exec -u vscode "$DC" docker image inspect docker:28-cli >/dev/null 2>&1 && break
+  docker exec -u vscode "$DC" docker pull -q docker:28-cli >/dev/null 2>&1; sleep 4
+done
+if ! docker exec -u vscode "$DC" docker image inspect docker:28-cli >/dev/null 2>&1; then
+  fail "setup: docker:28-cli not pullable — 5b inconclusive"; rc=1
 else
-  fail "privileged create through the bound docker.sock was NOT refused ($dood)"; rc=1
+  dood=$(docker exec -u vscode "$DC" docker run --rm -v /var/run/dind/docker.sock:/var/run/docker.sock docker:28-cli \
+    sh -c 'docker run --rm --privileged alpine:3.20 true 2>&1' | tr -d '\r')
+  if printf '%s' "$dood" | grep -qi "denied\|not permitted"; then
+    pass "docker.sock passthrough stays authz-guarded (privileged-through-Ryuk refused)"
+  else
+    fail "privileged create through the bound docker.sock was NOT refused ($dood)"; rc=1
+  fi
 fi
 
 # 5d. Plugin-socket tamper: a nested container must NOT be able to delete/replace
