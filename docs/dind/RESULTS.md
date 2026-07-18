@@ -13,12 +13,15 @@ Host used for these runs: Docker 29.x, `docker:28-dind` sidecar, `docker:28-cli`
 based test devcontainer. Tier-1 = tools on a normal network; Tier-2 (`egress`) =
 the real Huddle constraint (internal network, all egress via a forward proxy).
 
-> **These runs now go through the shipped C1 host-escape filter** (`dind-filter`),
-> not raw dockerd — `lib.sh` fronts the sidecar's `inner.sock` with the real filter
-> via `filter-runner.mjs`, exactly as the gateway does. So the results below reflect
-> the product's actual security posture: device/kernel/namespace escape vectors and
-> `--privileged` are refused; ordinary binds/volumes and every non-escape API pass
-> through. See `docs/dind/SECURITY-CRITICAL.md` (finding C1, MITIGATED).
+> **These runs go through the shipped C1 guard — a dockerd AUTHORIZATION PLUGIN**
+> (`dind-authz`), not raw dockerd. `lib.sh` runs the real plugin via
+> `authz-runner.mjs` and starts the sidecar dockerd with
+> `--authorization-plugin=huddle-authz`, exactly as the gateway does. So the
+> results reflect the product's actual security posture: device/kernel/namespace/
+> masked-path escape vectors and `--privileged` (create AND exec) are refused;
+> ordinary binds/volumes and every non-escape API pass through. There is no
+> unfiltered `inner.sock` (the earlier socket-proxy filter was bypassable — see
+> `docs/dind/SECURITY-CRITICAL.md`).
 
 **All workflows below pass** (compat rows) or **assert a documented limitation**
 (⛔ rows — tools that require `--privileged`, refused by the filter). Each row uses
@@ -32,7 +35,7 @@ C1 filter work found+fixed 3 more bugs (exec half-open, bind over-block, BuildKi
 | docker compose | ✅ pass | healthcheck-gated `up --wait`, service-name DNS, published port on `localhost` **and** `[::1]` |
 | Testcontainers (node) | ✅ pass | container start, `getMappedPort` (inspect), `exec` → PONG, reachable mapped port, stop; **Ryuk works** — binding the *filter* socket is allowed and stays filtered |
 | BuildKit / buildx | ✅ pass | legacy build, **default builder via `/grpc` h2c upgrade** (`docker build`), `buildx build --load` |
-| host-escape filter (C1) | ✅ pass | `--privileged` / `--device` / `--pid=host` / socket-dir bind **refused**; ordinary host-path bind + non-privileged run **allowed**; privileged-through-bound-filter-socket still refused |
+| host-escape authz plugin (C1) | ✅ pass | no `inner.sock`; raw privileged create over docker.sock → **403**; `--privileged`/`--device`/`--pid=host`/privileged-exec/MaskedPaths-unmask **refused**; ordinary bind + non-privileged run **allowed**; privileged-through-bound-docker.sock still refused |
 | k3d (Kubernetes) | ⛔ limitation | needs `--privileged` nodes → **refused by the filter** (asserted); use classic mode or a real cluster |
 | LocalStack | ✅ pass | container healthy on `localhost:4566`, real `aws s3 mb` succeeds |
 | act (GitHub Actions) | ✅ pass | runner image pull, workflow step executed, job succeeded |
