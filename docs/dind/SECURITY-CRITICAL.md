@@ -64,12 +64,28 @@ there is no second, unfiltered path to reach.
   its `/proc`, `/sys`, `/dev` are the HOST's *writable* kernel interfaces. A
   nested `-v /proc/sys:/x` then `echo … > /x/kernel/core_pattern` sets the host's
   core-dump handler → **host root** (verified live). The plugin refuses any bind
-  whose source is `/proc`, `/sys`, `/dev` or `/`. Ordinary binds (workspace, `/etc`,
-  the authz-guarded `docker.sock` for Ryuk) stay allowed.
+  whose source is `/proc`, `/sys`, `/dev`, `/run/docker/plugins` or `/` — in
+  `Binds`, `Mounts[].source`, a `local` volume's `DriverConfig.device`, AND at
+  `POST /volumes/create` (a `local`-driver `device` bind is set at volume-create,
+  then referenced by name — round-3 finding #1, verified live). Ordinary binds
+  (workspace, `/etc`, the authz-guarded `docker.sock` for Ryuk) stay allowed.
+- **Swarm services are refused** (`POST /services/create` / `/services/{id}/update`
+  — round-3 finding #2): their `ContainerSpec` is a second container/mount factory
+  that never reaches the container-create guard. Swarm-in-DinD is unsupported.
 - On `POST /containers/{id}/exec` it runs `validateExecEscape` (privileged/CapAdd
   exec — finding #7). The request path is normalized (version prefix, `//`,
   percent-encoding) before matching so a crafted create path can't dodge
   inspection (finding #6).
+
+### Lower-priority residuals (not host-root escapes)
+- `POST /containers/{id}/update` is not inspected — it can only re-apply cgroup
+  resources (mem/cpu/pids), so at worst a self-DoS bounded by the devcontainer's
+  own limits, not a host escape.
+- `POST /build` with BuildKit `--allow security.insecure` would need the daemon to
+  grant insecure entitlements; the sidecar dockerd does not (`--allow-insecure-
+  entitlement` is unset), so insecure build steps are refused by dockerd itself.
+- Installing docker **plugins** (`/plugins/pull`+`enable`) is not inspected; it
+  requires egress (allowlisted) and is an unusual surface — flagged for future work.
 
 ### The symlink variant (also closed)
 The host-kernel-bind deny above is by lexical source path, so a devcontainer with a
