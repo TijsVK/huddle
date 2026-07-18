@@ -52,4 +52,12 @@ docker ps --filter name="dind-$DC" --filter status=running -q | grep -q . && pas
 docker exec -u vscode "$DC" docker run --rm hello-world >/dev/null 2>&1 \
   && pass "docker fully works in the migrated devcontainer (unrestricted private daemon)" || { fail "docker not working after migrate"; rc=1; }
 
+# Guard: migrating a non-devcontainer (the gateway itself) must be REFUSED, not
+# destroy it (adversarial-review M2).
+g=$(curl -s -H "$AUTH" -H 'content-type: application/json' -X POST "$API/api/docker/containers/huddle/migrate" -d '{}')
+if echo "$g" | grep -qiE 'not a Huddle devcontainer|error'; then
+  pass "migrate refuses a non-devcontainer (guard)"
+  docker inspect huddle >/dev/null 2>&1 && pass "the non-devcontainer was NOT destroyed" || { fail "guard let the container be destroyed"; rc=1; }
+else fail "migrate did not refuse a non-devcontainer: $g"; rc=1; fi
+
 exit $rc
