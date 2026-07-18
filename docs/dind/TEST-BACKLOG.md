@@ -4,18 +4,19 @@ Beyond the passing suite (see RESULTS.md), these stress *distinct failure modes*
 Ranked by likelihood of exposing a real bug. ✅ = now covered, ⬜ = todo,
 ⚠️ = characterised limitation.
 
-> **The harness now runs the real C1 filter.** `lib.sh up()` fronts the sidecar's
-> `inner.sock` with the shipped `dind-filter` (via `filter-runner.mjs`), so every
-> tool is driven through the exact device/kernel/bind guard the gateway enforces —
-> not raw dockerd. Consequence: tools needing `--privileged` (kind, k3d, dind-in-
-> dind) are now REFUSED and their scripts assert that limitation instead of a
-> cluster spin-up.
+> **The harness runs the real C1 guard — a dockerd authorization plugin.**
+> `lib.sh up()` starts the sidecar dockerd with `--authorization-plugin=huddle-authz`
+> and runs the shipped plugin via `authz-runner.mjs`, so every tool is driven
+> through the exact device/kernel/masked-path guard the gateway enforces — not raw
+> dockerd. There is no unfiltered `inner.sock` (the earlier socket-proxy filter was
+> bypassable — see SECURITY-CRITICAL.md). Consequence: tools needing `--privileged`
+> (kind, k3d, dind-in-dind) are REFUSED and their scripts assert that limitation.
 
 ## Covered
-- ✅ compose, Testcontainers(node, **incl. Ryuk** via filter-socket passthrough),
-  buildx (default builder /grpc), host-path binds, workspace bind-through,
-  LocalStack, act, Dev Containers CLI, Tier-2 egress
-- ⚠️ **Privileged-node k8s (kind/k3d) & dind-in-dind** — refused by the C1 filter
+- ✅ compose, Testcontainers(node, **incl. Ryuk** — docker.sock is authz-guarded,
+  so binding it is safe), buildx (default builder /grpc), host-path binds,
+  workspace bind-through, LocalStack, act, Dev Containers CLI, Tier-2 egress
+- ⚠️ **Privileged-node k8s (kind/k3d) & dind-in-dind** — refused by the authz guard
   (need `--privileged`). `tools/{kind,k3d,nested2}.sh` assert the clean refusal.
   Use classic (socket-proxy) mode or a real cluster for those.
 - ✅ Full real-gateway Aspire **+ SqlServer** E2E (issues #12/#61) — DB answers queries
