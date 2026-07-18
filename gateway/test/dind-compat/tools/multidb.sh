@@ -29,7 +29,12 @@ else fail "$NAME: compose up --wait"; tail -8 /tmp/multidb.log >&2; down "$NAME"
 pg=$(dcsh "$NAME" 'cd /work/db && docker compose exec -T pg psql -U postgres -tAc "select 40+2"' 2>/dev/null | tr -d '[:space:]')
 [ "$pg" = 42 ] && pass "$NAME: postgres query (=$pg)" || { fail "$NAME: postgres ($pg)"; rc=1; }
 
-my=$(dcsh "$NAME" 'cd /work/db && docker compose exec -T my mysql -uroot -ppw -N -e "select 40+2" 2>/dev/null' | tr -d '[:space:]')
+# mysql:8's healthcheck can go healthy just before the root password is applied,
+# so retry the authenticated query a few times.
+my=""; for i in $(seq 1 15); do
+  my=$(dcsh "$NAME" 'cd /work/db && docker compose exec -T my mysql -uroot -ppw -N -e "select 40+2" 2>/dev/null' | tr -d '[:space:]')
+  [ "$my" = 42 ] && break; sleep 3
+done
 [ "$my" = 42 ] && pass "$NAME: mysql query (=$my)" || { fail "$NAME: mysql ($my)"; rc=1; }
 
 mo=$(dcsh "$NAME" 'cd /work/db && docker compose exec -T mo mongosh --quiet --eval "print(40+2)"' 2>/dev/null | tr -d '[:space:]')
