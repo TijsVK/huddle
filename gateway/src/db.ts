@@ -312,6 +312,23 @@ export interface AuditEntry {
 // Insert één audit-rij. Geeft het nieuwe row-id terug (of null bij fout) zodat
 // een in-flight request meteen gelogd kan worden en later via
 // updateAuditResponse aangevuld met de response.
+// Row cap: startup-only time pruning let an untrusted container spam audit_log
+// unbounded within a long session (disk-fill DoS). Cap the table and prune the
+// oldest overflow periodically (cheap: once every AUDIT_PRUNE_EVERY inserts).
+const AUDIT_MAX_ROWS = 200_000;
+const AUDIT_PRUNE_EVERY = 1_000;
+let _auditInserts = 0;
+function pruneAuditIfDue(): void {
+  if (++_auditInserts % AUDIT_PRUNE_EVERY !== 0) return;
+  try {
+    db.prepare(
+      `DELETE FROM audit_log WHERE id <= (
+         SELECT id FROM audit_log ORDER BY id DESC LIMIT 1 OFFSET ?
+       )`
+    ).run(AUDIT_MAX_ROWS);
+  } catch (err) { console.error('[audit] prune failed:', err); }
+}
+
 export function logAudit(entry: AuditEntry): number | null {
   try {
     const info = insertAudit().run(
@@ -328,6 +345,7 @@ export function logAudit(entry: AuditEntry): number | null {
       entry.resHeaders ?? null,
       entry.resBody ?? null,
     );
+    pruneAuditIfDue();
     return Number(info.lastInsertRowid);
   } catch (err) { console.error('[audit] log failed:', err); return null; }
 }

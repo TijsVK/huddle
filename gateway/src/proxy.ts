@@ -591,7 +591,11 @@ export function createProxyServer(): http.Server {
         complete(502);
       };
 
-      const upstreamPath: string | undefined = forwardUrl ?? innerReq.url ?? undefined;
+      // Percent-encode chars outside Node's allowed request-path range so
+      // https.request can't throw ERR_UNESCAPED_CHARACTERS (finding #2) — the
+      // plain-HTTP path does the same via safeRequestPath.
+      const rawUpstreamPath: string | undefined = forwardUrl ?? innerReq.url ?? undefined;
+      const upstreamPath: string | undefined = rawUpstreamPath === undefined ? undefined : safeRequestPath(rawUpstreamPath);
       const upstreamHost: string = hostname; // narrowed above (guard rejects falsy)
       function startUpstream(): void {
         attempt++;
