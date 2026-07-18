@@ -167,10 +167,13 @@ printf '%s' "$pl" | grep -qi "denied\|not permitted" && pass "docker plugin inst
 after=$(cat /proc/sys/kernel/core_pattern 2>/dev/null)
 [ "$before" = "$after" ] && pass "host core_pattern unchanged by nested bind attempts" || { fail "HOST ESCAPE — core_pattern changed ($before -> $after)"; rc=1; }
 
-# 6. A benign (non-socket) host-path bind MUST still be forwarded — the DinD
-#    compat win (compose/testcontainers workspace mounts). It resolves against the
-#    sidecar fs; reading the sidecar's own /etc/alpine-release proves it works.
-ok=$(docker exec -u vscode "$DC" docker run --rm -v /etc/alpine-release:/x:ro alpine:3.20 cat /x 2>/dev/null | tr -d '[:space:]')
-[ -n "$ok" ] && pass "benign host-path bind still forwarded (compose/testcontainers compat: $ok)" || { fail "benign host-path bind was blocked (compat regression)"; rc=1; }
+# 6. COMPAT: this is an EMPTY devcontainer (no workspace/shared mounts), so the
+#    bind allowlist permits named volumes + the docker socket, but NOT sidecar
+#    host paths like /etc (which would be symlink-plant ground). Confirm a named
+#    volume round-trips (the compat path that works here); /etc bind is refused.
+docker exec -u vscode "$DC" docker volume create escv >/dev/null 2>&1
+vok=$(docker exec -u vscode "$DC" docker run --rm -v escv:/v alpine:3.20 sh -c 'echo VOK > /v/f; cat /v/f' 2>/dev/null | tr -d '[:space:]')
+[ "$vok" = VOK ] && pass "named-volume round-trip works (compat under the allowlist)" || { fail "named volume broken (compat regression: $vok)"; rc=1; }
+docker exec -u vscode "$DC" docker run --rm -v /etc:/x alpine:3.20 true >/dev/null 2>&1 && { fail "/etc bind ALLOWED in empty mode (allowlist hole)"; rc=1; } || pass "/etc (non-shared sidecar dir) bind refused"
 
 exit $rc
