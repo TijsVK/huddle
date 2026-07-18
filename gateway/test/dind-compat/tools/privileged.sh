@@ -36,10 +36,14 @@ if printf '%s' "$out" | grep -qi "denied\|not permitted"; then
   pass "$NAME: docker.sock passthrough stays authz-guarded (privileged refused)"
 else fail "$NAME: privileged via bound docker.sock not refused"; rc=1; fi
 
-# 5. COMPAT: an ordinary host-path bind is still forwarded (resolves against the
-#    sidecar fs). Reading the sidecar's own /etc/alpine-release proves it works.
-out=$(dcsh "$NAME" 'docker run --rm -v /etc/alpine-release:/x:ro alpine:3.20 cat /x 2>&1' | tr -d "\r")
-assert_contains "$out" "3." "$NAME: benign host-path bind still works (compose/testcontainers compat)" || rc=1
+# 5. COMPAT: a bind under the shared workspace (/work) is forwarded. (The bind
+#    allowlist permits only shared-root / named-volume / docker.sock sources.)
+out=$(dcsh "$NAME" 'echo WS_BIND_OK > /work/pf.txt; docker run --rm -v /work/pf.txt:/x:ro alpine:3.20 cat /x 2>&1' | tr -d "\r")
+assert_contains "$out" "WS_BIND_OK" "$NAME: workspace bind still works (compose/testcontainers compat)" || rc=1
+
+# 5b. A bind of a NON-shared sidecar dir (/etc) is refused (symlink-plant ground).
+out=$(dcsh "$NAME" 'docker run --rm -v /etc:/x alpine:3.20 true 2>&1' | tr -d "\r")
+assert_contains "$out" "not permitted" "$NAME: bind of a non-shared sidecar dir refused (allowlist)" || rc=1
 
 # 6. COMPAT: a non-privileged nested container runs fine.
 out=$(dcsh "$NAME" 'docker run --rm alpine:3.20 echo RUN_OK 2>&1' | tr -d "\r")
