@@ -120,10 +120,11 @@ plugins` could replace the authz socket with an allow-all one — plugin dir now
 mounted READ-ONLY into the sidecar); #3 host-kernel bind (privileged sidecar's
 /proc,/sys are the HOST's — `-v /proc/sys` wrote the host core_pattern → root; now
 deny binds of /proc,/sys,/dev,/); #4 partial MaskedPaths unmask (require a superset
-of runc defaults). Residual: the #3 deny is lexical, so a workspace-symlink variant
-remains (documented in SECURITY-CRITICAL.md — needs nosymfollow workspace or
-dropping host binds). Full harness battery GREEN (23/23 tools) + all 10 e2e GREEN
-under authz; 256 unit tests.
+of runc defaults). The #3 workspace-symlink variant is now also CLOSED:
+shared workspace/folder mounts are remounted `nosymfollow` in the sidecar so
+dockerd can't follow a symlink out of the workspace during bind-source resolution
+(verified live; compose `./path` binds unaffected). Full harness battery GREEN
+(23/23 tools) + all 10 e2e GREEN under authz; 256 unit tests.
 
 Cost/limitation: `--privileged`-needing tools (kind, k3d, helm-on-k3d, dind-in-dind)
 are refused in DinD mode; their harness scripts assert that limitation. The compat
