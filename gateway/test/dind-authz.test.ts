@@ -26,28 +26,36 @@ describe('dind-authz authorize()', () => {
   it('denies a --device create', () => {
     expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Devices: [{ PathOnHost: '/dev/sda' }] } }))).toMatch(/Devices/);
   });
-  it('ALLOWS ordinary host-path binds (workspace/etc + the authz-guarded docker.sock)', () => {
-    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Binds: ['/etc:/h', '/home/vscode/proj:/w', '/var/run/dind/docker.sock:/s'] } }))).toBeNull();
+  // Bind ALLOWLIST (review round-4 #2): only binds under a nosymfollow'd shared
+  // root (safeRoots) or the authz-guarded docker socket are allowed — the sidecar's
+  // own writable dirs (/tmp,/etc,…) are NOT, else a planted symlink escapes.
+  const SAFE = ['/workspaces', '/home/vscode', '/work'];
+  it('ALLOWS binds under a safe root + the docker socket', () => {
+    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Binds: ['/workspaces/p/data:/w', '/home/vscode/x:/y', '/var/run/dind/docker.sock:/s'] } }), SAFE)).toBeNull();
   });
-  // finding #3: the privileged sidecar's /proc,/sys,/dev are the HOST's — a
-  // /proc/sys bind lets a nested container write core_pattern → host root.
+  it('DENIES binds of the sidecar\'s own writable dirs (symlink-plant ground)', () => {
+    for (const src of ['/tmp', '/etc', '/root', '/var', '/usr', '/opt']) {
+      expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Binds: [`${src}:/x`] } }), SAFE)).toMatch(/not permitted/);
+    }
+  });
+  // The privileged sidecar's /proc,/sys,/dev are the HOST's — always refused.
   it.each([
     '/proc/sys', '/proc', '/sys', '/sys/kernel', '/dev', '/dev/mem', '/', '/proc/sys/../sys',
   ])('denies a bind of host kernel path %s', (src) => {
-    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Binds: [`${src}:/x`] } }))).toMatch(/host kernel path/);
+    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Binds: [`${src}:/x`] } }), SAFE)).toMatch(/not permitted/);
   });
   it('denies a host-kernel bind expressed as a Mount', () => {
-    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Mounts: [{ Type: 'bind', Source: '/proc/sys', Target: '/x' }] } }))).toMatch(/host kernel path/);
+    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Mounts: [{ Type: 'bind', Source: '/proc/sys', Target: '/x' }] } }), SAFE)).toMatch(/not permitted/);
   });
   // A local volume with device+o=bind is a bind in disguise — the path is in
   // VolumeOptions.DriverConfig, not Mounts.Source (verified live: wrote host core_pattern).
-  it('denies a local-volume-driver device bind of a host kernel path', () => {
+  it('denies a local-volume-driver device bind outside the safe roots', () => {
     const m = { Type: 'volume', Target: '/x', VolumeOptions: { DriverConfig: { Name: 'local', Options: { type: 'none', device: '/proc/sys', o: 'bind' } } } };
-    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Mounts: [m] } }))).toMatch(/host kernel path/);
+    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Mounts: [m] } }), SAFE)).toMatch(/not permitted/);
   });
-  it('allows a local-volume-driver device bind of a benign path', () => {
+  it('allows a local-volume-driver device bind under a safe root', () => {
     const m = { Type: 'volume', Target: '/x', VolumeOptions: { DriverConfig: { Name: 'local', Options: { type: 'none', device: '/home/vscode/d', o: 'bind' } } } };
-    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Mounts: [m] } }))).toBeNull();
+    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Mounts: [m] } }), SAFE)).toBeNull();
   });
   it('fails CLOSED when a create carries no inspectable body', () => {
     expect(authorize(req('POST', '/v1.45/containers/create'))).toMatch(/not available/);
@@ -88,14 +96,20 @@ describe('dind-authz authorize()', () => {
 
   // review #3 finding #1: the bind-in-disguise device can be set at volume-create
   // (then referenced by name), dodging the container-create guard.
-  it('denies a /volumes/create with a device bind of a host kernel path', () => {
-    expect(authorize(req('POST', '/v1.45/volumes/create', { Name: 'evil', Driver: 'local', DriverOpts: { type: 'none', o: 'bind', device: '/proc/sys' } }))).toMatch(/host kernel path/);
-    // case-variant keys too
-    expect(authorize(req('POST', '/v1.45/volumes/create', { driveropts: { DEVICE: '/sys' } }))).toMatch(/host kernel path/);
+  it('denies a /volumes/create with a device outside the safe roots', () => {
+    expect(authorize(req('POST', '/v1.45/volumes/create', { Name: 'evil', Driver: 'local', DriverOpts: { type: 'none', o: 'bind', device: '/proc/sys' } }), SAFE)).toMatch(/not permitted/);
+    expect(authorize(req('POST', '/v1.45/volumes/create', { driveropts: { DEVICE: '/sys' } }), SAFE)).toMatch(/not permitted/);
+    expect(authorize(req('POST', '/v1.45/volumes/create', { driveropts: { device: '/tmp' } }), SAFE)).toMatch(/not permitted/);
   });
-  it('allows a benign /volumes/create', () => {
-    expect(authorize(req('POST', '/v1.45/volumes/create', { Name: 'data' }))).toBeNull();
-    expect(authorize(req('POST', '/v1.45/volumes/create', { Name: 'wsv', Driver: 'local', DriverOpts: { type: 'none', o: 'bind', device: '/home/vscode/d' } }))).toBeNull();
+  it('allows a benign /volumes/create (no device, or device under a safe root)', () => {
+    expect(authorize(req('POST', '/v1.45/volumes/create', { Name: 'data' }), SAFE)).toBeNull();
+    expect(authorize(req('POST', '/v1.45/volumes/create', { Name: 'wsv', Driver: 'local', DriverOpts: { type: 'none', o: 'bind', device: '/home/vscode/d' } }), SAFE)).toBeNull();
+  });
+  it('denies docker plugin install (review round-4 #1)', () => {
+    expect(authorize(req('POST', '/v1.45/plugins/create?name=evil'))).toMatch(/plugin/);
+    expect(authorize(req('POST', '/v1.45/plugins/pull'))).toMatch(/plugin/);
+    expect(authorize(req('POST', '/v1.45/plugins/evil/enable'))).toMatch(/plugin/);
+    expect(authorize(req('POST', '/v1.45/plugins/evil/set'))).toMatch(/plugin/);
   });
   // review #3 finding #2: swarm services are an unchecked container/mount factory.
   it('denies swarm service create/update', () => {
@@ -138,8 +152,9 @@ describe('validateDindEscape / validateExecEscape (findings #3/#7/#8)', () => {
     expect(validateDindEscape({ SecurityOpt: ['seccomp=default'] })).toBeNull();
     expect(validateDindEscape({ SecurityOpt: ['apparmor=docker-default'] })).toBeNull();
   });
-  it('allows a plain create and ordinary binds', () => {
-    expect(validateDindEscape({ Memory: 1e6, Binds: ['/home/x:/x'] })).toBeNull();
+  it('allows a plain create and ordinary binds (under a safe root)', () => {
+    expect(validateDindEscape({ Memory: 1e6, Binds: ['/home/x:/x'] }, ['/home/x'])).toBeNull();
+    expect(validateDindEscape({ Memory: 1e6 })).toBeNull();
   });
   it('exec escape: privileged + CapAdd denied, plain allowed (#7)', () => {
     expect(validateExecEscape({ Privileged: true })).toMatch(/privileged/);

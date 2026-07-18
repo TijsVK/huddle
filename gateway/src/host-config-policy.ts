@@ -146,38 +146,62 @@ function normPath(p: string): string {
 // `/`, which contains them). Ordinary binds (workspace, /etc, docker.sock, …) stay
 // allowed. Review finding #3.
 // /proc,/sys,/dev: the privileged sidecar's HOST kernel interfaces.
-// /run/docker/plugins: the authz plugin socket dir (a rw re-bind could otherwise
-// shadow the plugin — defense-in-depth atop the read-only mount, review #3 #3).
+// /run/docker/plugins: the authz plugin socket dir. Always refused, even if a
+// safeRoot somehow contained them.
 const SENSITIVE_BIND_ROOTS = ['/proc', '/sys', '/dev', '/run/docker/plugins'];
-function bindSourceSensitive(rawSrc: string): boolean {
-  if (!rawSrc.startsWith('/')) return false; // named volume / relative
-  const p = normPath(rawSrc);
+function bindSourceSensitive(p: string): boolean {
   if (p === '/') return true;
   for (const root of SENSITIVE_BIND_ROOTS) {
     if (p === root || p.startsWith(root + '/')) return true;
   }
   return false;
 }
-function dindBindEscape(hc: any): string | null {
+
+// Docker sockets a nested container may legitimately bind (Testcontainers Ryuk /
+// docker-outside-of-docker). They are authz-guarded and their dirs aren't
+// attacker-writable, so binding the exact socket file is safe.
+const ALLOWED_SOCKET_BINDS = ['/var/run/dind/docker.sock', '/run/dind/docker.sock', '/var/run/docker.sock'];
+
+// A bind SOURCE (or a local-volume device path) is allowed only if it is a named
+// volume/relative, an allowed docker socket, or under one of the `safeRoots` — the
+// nosymfollow'd shared mounts (workspace + folder mappings). ALLOWLIST, not
+// denylist: the privileged sidecar's own writable dirs (/tmp, /etc, /home, …) must
+// NOT be bindable, because a nested container can plant a symlink there
+// (`/tmp/x -> /proc`) and bind it, reaching the host's rw /proc — dockerd follows
+// the symlink on the sidecar fs (review round-4 finding #2, verified live). Only
+// the shared roots are nosymfollow'd, so only they are safe to bind.
+export function bindSourceAllowed(rawSrc: string, safeRoots: string[]): boolean {
+  if (!rawSrc.startsWith('/')) return true; // named volume / relative
+  const p = normPath(rawSrc);
+  if (bindSourceSensitive(p)) return false; // never, even if a safeRoot contains it
+  if (ALLOWED_SOCKET_BINDS.includes(p)) return true;
+  for (const root of safeRoots) {
+    if (typeof root !== 'string' || !root.startsWith('/')) continue;
+    const r = normPath(root);
+    if (p === r || p.startsWith(r + '/')) return true;
+  }
+  return false;
+}
+
+function dindBindEscape(hc: any, safeRoots: string[]): string | null {
   if (Array.isArray(hc.binds)) {
     for (const bind of hc.binds) {
       if (typeof bind !== 'string') continue;
-      if (bindSourceSensitive(bind.split(':')[0] ?? '')) return `bind of a host kernel path not permitted: ${bind}`;
+      const src = bind.split(':')[0] ?? '';
+      if (!bindSourceAllowed(src, safeRoots)) return `bind source not permitted (workspace / named volume / docker.sock only): ${bind}`;
     }
   }
   if (Array.isArray(hc.mounts)) {
     for (const m of hc.mounts) {
       if (!m) continue;
-      if (m.type === 'bind' && typeof m.source === 'string' && bindSourceSensitive(m.source))
-        return `bind of a host kernel path not permitted: ${m.source}`;
+      if (m.type === 'bind' && typeof m.source === 'string' && !bindSourceAllowed(m.source, safeRoots))
+        return `bind source not permitted: ${m.source}`;
       // A `local` volume with a `device`+`o=bind` option is a bind mount in
-      // disguise — `--mount type=volume,volume-opt=device=/proc/sys,volume-opt=o=bind`
-      // reaches the host's rw /proc/sys and dodges the Binds/Mounts.Source check
-      // (verified live: wrote host core_pattern). The path lives in
-      // VolumeOptions.DriverConfig.Options.device. Guard it the same way.
+      // disguise (verified live: device=/proc/sys wrote host core_pattern). The
+      // path lives in VolumeOptions.DriverConfig.Options.device — same allowlist.
       const dev = m.volumeoptions?.driverconfig?.options?.device;
-      if (typeof dev === 'string' && bindSourceSensitive(dev))
-        return `volume device bind of a host kernel path not permitted: ${dev}`;
+      if (typeof dev === 'string' && !bindSourceAllowed(dev, safeRoots))
+        return `volume device source not permitted: ${dev}`;
     }
   }
   return null;
@@ -189,10 +213,10 @@ function dindBindEscape(hc: any): string | null {
 // kernel interface (/proc, /sys, /dev, /) — those are the HOST's, writable, through
 // the privileged sidecar (finding #3). Ordinary binds (workspace, /etc, the
 // authz-guarded docker.sock for Ryuk) stay allowed. Returns a reason or null.
-export function validateDindEscape(hostConfig: any): string | null {
+export function validateDindEscape(hostConfig: any, safeRoots: string[] = []): string | null {
   if (!hostConfig || typeof hostConfig !== 'object') return null;
   const hc = lowerKeysDeep(hostConfig);
-  return kernelEscapeLC(hc) ?? dindBindEscape(hc);
+  return kernelEscapeLC(hc) ?? dindBindEscape(hc, safeRoots);
 }
 
 // `POST /volumes/create` is a SECOND door to the bind-in-disguise escape (review
@@ -201,11 +225,11 @@ export function validateDindEscape(hostConfig: any): string | null {
 // time, so a later container-create that references it by NAME carries no
 // sensitive path for the create-time guard to see. Reject the dangerous device at
 // volume-create time. Returns a reason or null.
-export function validateVolumeCreate(body: any): string | null {
+export function validateVolumeCreate(body: any, safeRoots: string[] = []): string | null {
   if (!body || typeof body !== 'object') return null;
   const b = lowerKeysDeep(body);
   const dev = b.driveropts?.device;
-  if (typeof dev === 'string' && bindSourceSensitive(dev))
-    return `volume device bind of a host kernel path not permitted: ${dev}`;
+  if (typeof dev === 'string' && !bindSourceAllowed(dev, safeRoots))
+    return `volume device source not permitted: ${dev}`;
   return null;
 }

@@ -48,7 +48,7 @@ up() {
   docker volume create "$work" >/dev/null
   # Start the authz plugin on the host BEFORE dockerd, so the socket is present
   # when dockerd loads the plugin (dockerd fails requests closed otherwise).
-  node "$HERE/authz-runner.mjs" "$name" "$plugindir/huddle-authz.sock" >"$sockdir/authz.log" 2>&1 &
+  node "$HERE/authz-runner.mjs" "$name" "$plugindir/huddle-authz.sock" /work >"$sockdir/authz.log" 2>&1 &
   echo $! > "$sockdir/authz.pid"
   for i in $(seq 1 40); do [ -S "$plugindir/huddle-authz.sock" ] && break; sleep 0.25; done
   # /work is a workspace volume shared by BOTH devcontainer and sidecar at the same

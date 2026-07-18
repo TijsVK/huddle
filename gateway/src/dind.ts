@@ -278,7 +278,9 @@ export async function createDindSidecar(
 
   // Start the authz plugin BEFORE the sidecar so the socket exists when dockerd
   // loads the plugin (dockerd fails requests closed if the plugin is unreachable).
-  await createDindAuthz(containerName, dindPluginSockPath(containerName));
+  // safeRoots = the nosymfollow'd shared-mount targets; bind sources are allowed
+  // only under them (or the docker socket / named volumes).
+  await createDindAuthz(containerName, dindPluginSockPath(containerName), sharedMounts.map(m => m.Target));
 
   await dockerRequest('POST', `/containers/${id}/start`, {});
   console.log(`[dind] sidecar ${name} started (netns of ${containerName}), authz plugin active`);
@@ -322,8 +324,10 @@ export async function ensureDindSidecar(containerName: string, devcontainerId: s
     // running under --authorization-plugin, but the plugin SERVER lives in the
     // gateway process and is now gone — so dockerd fails every request closed
     // until we re-establish it. Re-create the authz plugin BEFORE (re)starting so
-    // the socket is present when dockerd reconnects.
-    await createDindAuthz(containerName, dindPluginSockPath(containerName));
+    // the socket is present when dockerd reconnects. safeRoots (bind allowlist) are
+    // derived from the devcontainer's shared mounts, same as createDindSidecar.
+    const restoreRoots = (await sharedMountsFromDevcontainer(devcontainerId)).map(m => m.Target);
+    await createDindAuthz(containerName, dindPluginSockPath(containerName), restoreRoots);
     if (!info?.State?.Running) {
       await dockerRequest('POST', `/containers/${encodeURIComponent(name)}/start`, {});
       console.log(`[dind] sidecar ${name} restarted`);

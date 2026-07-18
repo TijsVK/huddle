@@ -48,8 +48,10 @@ function decodeBody(b64: string | undefined): any {
   try { return JSON.parse(Buffer.from(b64, 'base64').toString('utf8')); } catch { return undefined; }
 }
 
-// The core decision. Returns a denial reason, or null to allow.
-export function authorize(req: AuthZReq): string | null {
+// The core decision. `safeRoots` are the nosymfollow'd shared-mount targets that
+// bind sources are allowed under (workspace + folder mappings). Returns a denial
+// reason, or null to allow.
+export function authorize(req: AuthZReq, safeRoots: string[] = []): string | null {
   const method = (req.RequestMethod || '').toUpperCase();
   const uri = normUri(req.RequestUri || '');
 
@@ -60,7 +62,7 @@ export function authorize(req: AuthZReq): string | null {
     if (body === undefined) return 'container create body not available for inspection';
     // dockerd matches keys case-insensitively, so extract HostConfig the same way
     // (finding #1) — `body.HostConfig` alone misses {"hostconfig":{...}}.
-    return validateDindEscape(lowerKeysDeep(body).hostconfig);
+    return validateDindEscape(lowerKeysDeep(body).hostconfig, safeRoots);
   }
   // Exec-create: Privileged/CapAdd live at the top level of the body.
   if (method === 'POST' && /^\/containers\/[^/]+\/exec$/.test(uri)) {
@@ -73,7 +75,7 @@ export function authorize(req: AuthZReq): string | null {
   if (method === 'POST' && uri === '/volumes/create') {
     const body = decodeBody(req.RequestBody);
     if (body === undefined) return 'volume create body not available for inspection';
-    return validateVolumeCreate(body);
+    return validateVolumeCreate(body, safeRoots);
   }
   // Swarm SERVICE create/update is a second container/mount factory: its
   // TaskTemplate.ContainerSpec carries Mounts + Privileges that never reach the
@@ -81,6 +83,15 @@ export function authorize(req: AuthZReq): string | null {
   // devcontainer private daemon is not a supported workflow — refuse it wholesale.
   if (method === 'POST' && (uri === '/services/create' || /^\/services\/[^/]+\/update$/.test(uri))) {
     return 'swarm services not permitted in DinD';
+  }
+  // Managed-plugin install (review round-4 finding #1): `docker plugin create`
+  // POSTs a LOCAL tar (no egress, no operator prompt) whose config.json can
+  // request host bind mounts / caps / all-devices; the plugin then runs as root on
+  // the privileged sidecar with those — a full host escape that never touches the
+  // container-create guard. Refuse plugin install/enable/configure wholesale.
+  if (method === 'POST' && (uri === '/plugins/create' || uri === '/plugins/pull' ||
+      /^\/plugins\/[^/]+\/(enable|set|upgrade)$/.test(uri) || /^\/plugins\/[^/]+\/push$/.test(uri))) {
+    return 'docker plugin install not permitted in DinD';
   }
   return null;
 }
@@ -91,7 +102,7 @@ function sendJson(res: http.ServerResponse, obj: unknown): void {
   res.end(j);
 }
 
-export function createDindAuthz(containerName: string, pluginSockPath: string): Promise<http.Server> {
+export function createDindAuthz(containerName: string, pluginSockPath: string, safeRoots: string[] = []): Promise<http.Server> {
   const existing = authzServers.get(containerName);
   if (existing) { existing.close(); authzServers.delete(containerName); }
   try { fs.mkdirSync(path.dirname(pluginSockPath), { recursive: true }); } catch {}
@@ -108,7 +119,7 @@ export function createDindAuthz(containerName: string, pluginSockPath: string): 
           let parsed: AuthZReq = {};
           try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { /* treat as empty → allow */ }
           let denial: string | null = null;
-          try { denial = authorize(parsed); }
+          try { denial = authorize(parsed, safeRoots); }
           catch { denial = 'authorization check failed'; } // fail closed on our own bug
           if (denial) sendJson(res, { Allow: false, Msg: `blocked by Huddle: ${denial}` });
           else sendJson(res, { Allow: true });

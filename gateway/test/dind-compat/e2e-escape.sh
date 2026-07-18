@@ -152,6 +152,18 @@ docker exec -u vscode "$DC" sh -c 'docker swarm init >/dev/null 2>&1' >/dev/null
 sw=$(docker exec -u vscode "$DC" docker service create --mount type=bind,source=/proc/sys,target=/host alpine:3.20 true 2>&1 | tr -d '\r')
 printf '%s' "$sw" | grep -qi "denied\|not permitted" && pass "swarm service create refused" || { fail "swarm service create NOT refused ($sw)"; rc=1; }
 
+# 5j. Sidecar-scratch symlink (review#4 #2): binding a NON-shared sidecar dir
+#     (/tmp,/etc,…) is refused — else a planted symlink (/tmp/x -> /proc) escapes.
+#     Only nosymfollow'd shared roots + docker.sock + named volumes are bindable.
+if docker exec -u vscode "$DC" docker run --rm -v /tmp:/m alpine:3.20 true >/dev/null 2>&1; then
+  fail "bind of sidecar /tmp ALLOWED (symlink-plant escape ground open)"; rc=1
+else pass "bind of a non-shared sidecar dir (/tmp) refused (bind allowlist)"; fi
+
+# 5k. Managed-plugin install (review#4 #1): a local plugin tar can request host
+#     mounts/caps and runs as root on the privileged sidecar — refused.
+pl=$(docker exec -u vscode "$DC" sh -c 'docker plugin install --grant-all-permissions vieux/sshfs 2>&1' | tr -d '\r')
+printf '%s' "$pl" | grep -qi "denied\|not permitted" && pass "docker plugin install refused" || { fail "docker plugin install NOT refused ($pl)"; rc=1; }
+
 after=$(cat /proc/sys/kernel/core_pattern 2>/dev/null)
 [ "$before" = "$after" ] && pass "host core_pattern unchanged by nested bind attempts" || { fail "HOST ESCAPE — core_pattern changed ($before -> $after)"; rc=1; }
 
