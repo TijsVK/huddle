@@ -318,15 +318,22 @@ export interface AuditEntry {
 const AUDIT_MAX_ROWS = 200_000;
 const AUDIT_PRUNE_EVERY = 1_000;
 let _auditInserts = 0;
-function pruneAuditIfDue(): void {
-  if (++_auditInserts % AUDIT_PRUNE_EVERY !== 0) return;
+
+// Keep only the newest `maxRows` audit rows. No-op when under the cap (the OFFSET
+// subquery returns NULL, so `id <= NULL` matches nothing). Exported for testing.
+export function pruneAuditLog(maxRows: number = AUDIT_MAX_ROWS): void {
   try {
     db.prepare(
       `DELETE FROM audit_log WHERE id <= (
          SELECT id FROM audit_log ORDER BY id DESC LIMIT 1 OFFSET ?
        )`
-    ).run(AUDIT_MAX_ROWS);
+    ).run(maxRows);
   } catch (err) { console.error('[audit] prune failed:', err); }
+}
+
+function pruneAuditIfDue(): void {
+  if (++_auditInserts % AUDIT_PRUNE_EVERY !== 0) return;
+  pruneAuditLog(AUDIT_MAX_ROWS);
 }
 
 export function logAudit(entry: AuditEntry): number | null {
