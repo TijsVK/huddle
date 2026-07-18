@@ -104,6 +104,15 @@ export function createDindAuthz(containerName: string, pluginSockPath: string): 
       req.on('error', () => { try { res.destroy(); } catch { /* noop */ } });
     });
 
+    // Only dockerd (a handful of connections) legitimately talks to this socket.
+    // A nested container could bind + flood it; since all per-container authz
+    // servers share the gateway process, cap connections and drop slow/idle ones
+    // so one devcontainer can't exhaust the gateway's fds (finding #4 residual).
+    server.maxConnections = 256;
+    server.headersTimeout = 3000;
+    server.requestTimeout = 5000;
+    server.keepAliveTimeout = 5000;
+
     server.on('error', reject);
     server.listen(pluginSockPath, () => {
       try { fs.chmodSync(pluginSockPath, 0o600); } catch { /* best effort */ }

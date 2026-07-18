@@ -26,9 +26,9 @@ exists_v(){ docker volume inspect "$1" >/dev/null 2>&1; }
 exists_n(){ docker network inspect "$1" >/dev/null 2>&1; }
 
 exists_c "$DC" && exists_c "dind-$DC" && pass "devcontainer + sidecar exist before delete" || { fail "setup missing"; rc=1; }
-# Socket topology is a host bind DIR (/tmp/dc-sockets/<name>) holding docker.sock
-# (filter) + inner.sock (sidecar dockerd), plus the data volume.
-[ -S "/tmp/dc-sockets/$DC/docker.sock" ] && exists_v "huddle-dind-data-$DC" && pass "dind sock dir + data volume exist before delete" || { fail "dind sock dir / data volume missing"; rc=1; }
+# Socket topology (authz model): host tree /tmp/dc-sockets/<name>/ with
+# outer/docker.sock (dockerd) + plugin/huddle-authz.sock (gateway), plus the data volume.
+[ -S "/tmp/dc-sockets/$DC/outer/docker.sock" ] && exists_v "huddle-dind-data-$DC" && pass "dind sock dir + data volume exist before delete" || { fail "dind sock dir / data volume missing"; rc=1; }
 
 log "DELETE /api/docker/containers/$DC"
 resp=$(curl -s -H "$AUTH" -X DELETE "$API/api/docker/containers/$DC")
