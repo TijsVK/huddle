@@ -561,53 +561,87 @@ export function createProxyServer(): http.Server {
         });
       };
 
-      const upstreamReq = https.request(
-        {
-          hostname,
-          port,
-          method: innerReq.method,
-          // Forward het genormaliseerde pad dat we ook gecontroleerd hebben, niet
-          // de rauwe (mogelijk traversal-getruceerde) innerReq.url (finding #7).
-          path: forwardUrl ?? innerReq.url,
-          headers: upstreamHeaders,
-          servername: hostname,
-        },
-        (upstreamRes) => {
-          if (isTokenRequest && upstreamRes.statusCode === 200) {
-            handleTokenExchangeResponse(upstreamRes, innerRes, containerId, complete);
-          } else {
-            innerRes.writeHead(upstreamRes.statusCode || 502, sanitizeResHeaders(upstreamRes.headers));
-            upstreamRes.on('data', (chunk: Buffer) => {
-              if (!innerRes.writableEnded) innerRes.write(chunk);
-              if (resBytes < CAP) { resChunks.push(chunk); resBytes += chunk.length; }
-            });
-            upstreamRes.on('end', () => {
-              if (!innerRes.writableEnded) innerRes.end();
-              complete(upstreamRes.statusCode ?? null, upstreamRes.headers);
-            });
-            upstreamRes.on('error', () => {
-              if (!innerRes.writableEnded) innerRes.destroy();
-              complete(0, upstreamRes.headers);
-            });
-          }
-        },
-      );
+      // Connection-level upstream failures (a flaky/loaded network hiccup) are
+      // transient. Retry them for IDEMPOTENT requests (no body) before returning
+      // 502 — otherwise a single dropped connect breaks tools that fire many
+      // rapid requests (e.g. `go mod`, which the network's own retries can't save
+      // if every attempt hits the same flaky window). Non-idempotent requests
+      // (POST/PUT/PATCH — bodies, streaming SSE) are NEVER retried, so that path
+      // behaves exactly as before.
+      const method = (innerReq.method ?? 'GET').toUpperCase();
+      const idempotent = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
+      const RETRYABLE = new Set(['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH']);
+      const MAX_ATTEMPTS = idempotent ? 3 : 1;
+      let attempt = 0;
+      let upstreamReq: http.ClientRequest;
 
-      upstreamReq.on('error', (err) => {
+      const onUpstreamError = (err: NodeJS.ErrnoException): void => {
+        if (idempotent && err.code && RETRYABLE.has(err.code) && attempt < MAX_ATTEMPTS && !innerRes.headersSent && resBytes === 0) {
+          console.warn(`[proxy] upstream ${err.code} ${hostname}:${port} (attempt ${attempt}/${MAX_ATTEMPTS}) — retrying`);
+          setTimeout(startUpstream, 150 * attempt);
+          return;
+        }
+        console.warn(`[proxy] upstream error ${hostname}:${port} ${method} ${forwardUrl ?? innerReq.url} → ${err.code ?? err.name}: ${err.message}`);
         if (!innerRes.headersSent) {
           try {
             innerRes.writeHead(502, { 'content-type': 'application/json' });
-            innerRes.end(JSON.stringify({ error: 'bad_gateway', message: err.message }));
+            innerRes.end(JSON.stringify({ error: 'bad_gateway', message: err.message, code: err.code }));
           } catch {}
         }
         complete(502);
-      });
+      };
 
-      innerReq.on('data', (chunk: Buffer) => {
-        upstreamReq.write(chunk);
-        if (reqBytes < CAP) { reqChunks.push(chunk); reqBytes += chunk.length; }
-      });
-      innerReq.on('end', () => upstreamReq.end());
+      const upstreamPath: string | undefined = forwardUrl ?? innerReq.url ?? undefined;
+      const upstreamHost: string = hostname; // narrowed above (guard rejects falsy)
+      function startUpstream(): void {
+        attempt++;
+        upstreamReq = https.request(
+          {
+            hostname: upstreamHost,
+            port,
+            method: innerReq.method,
+            // Forward het genormaliseerde pad dat we ook gecontroleerd hebben, niet
+            // de rauwe (mogelijk traversal-getruceerde) innerReq.url (finding #7).
+            path: upstreamPath,
+            headers: upstreamHeaders,
+            servername: upstreamHost,
+          },
+          (upstreamRes) => {
+            if (isTokenRequest && upstreamRes.statusCode === 200) {
+              handleTokenExchangeResponse(upstreamRes, innerRes, containerId, complete);
+            } else {
+              innerRes.writeHead(upstreamRes.statusCode || 502, sanitizeResHeaders(upstreamRes.headers));
+              upstreamRes.on('data', (chunk: Buffer) => {
+                if (!innerRes.writableEnded) innerRes.write(chunk);
+                if (resBytes < CAP) { resChunks.push(chunk); resBytes += chunk.length; }
+              });
+              upstreamRes.on('end', () => {
+                if (!innerRes.writableEnded) innerRes.end();
+                complete(upstreamRes.statusCode ?? null, upstreamRes.headers);
+              });
+              upstreamRes.on('error', () => {
+                if (!innerRes.writableEnded) innerRes.destroy();
+                complete(0, upstreamRes.headers);
+              });
+            }
+          },
+        );
+        upstreamReq.on('error', onUpstreamError);
+        // Idempotent requests carry no body → finish immediately so they can be
+        // safely retried. Non-idempotent bodies are streamed in below.
+        if (idempotent) upstreamReq.end();
+      }
+      startUpstream();
+
+      if (idempotent) {
+        innerReq.on('data', () => {}); // drain any unexpected body
+      } else {
+        innerReq.on('data', (chunk: Buffer) => {
+          upstreamReq.write(chunk);
+          if (reqBytes < CAP) { reqChunks.push(chunk); reqBytes += chunk.length; }
+        });
+        innerReq.on('end', () => upstreamReq.end());
+      }
       innerReq.on('error', () => upstreamReq.destroy());
     });
     innerHttp.on('clientError', (_err, sock) => { try { sock.destroy(); } catch {} });
