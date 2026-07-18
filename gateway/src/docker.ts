@@ -634,6 +634,12 @@ chmod 644 /usr/local/share/ca-certificates/huddle-ca.crt
 command -v update-ca-certificates >/dev/null 2>&1 && update-ca-certificates >/dev/null 2>&1 || true
 printf 'export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/huddle-ca.crt\\n' > /etc/profile.d/99-huddle-ca.sh
 chmod 644 /etc/profile.d/99-huddle-ca.sh
+# Also export ASPIRE_ALLOW_UNSECURED_TRANSPORT from a login-shell profile (belt +
+# suspenders on top of the container Env): some IDE env-probes seed the terminal/
+# debugger from the login shell, so a profile export guarantees an IDE-launched
+# dotnet run inherits it. Fixes the Aspire dashboard gRPC UntrustedRoot (dev-cert).
+printf 'export ASPIRE_ALLOW_UNSECURED_TRANSPORT=true\\n' > /etc/profile.d/99-huddle-aspire.sh
+chmod 644 /etc/profile.d/99-huddle-aspire.sh
 
 ${IDE_CRED_SCRUB}
 
@@ -768,6 +774,12 @@ chmod 644 /usr/local/share/ca-certificates/huddle-ca.crt
 command -v update-ca-certificates >/dev/null 2>&1 && update-ca-certificates >/dev/null 2>&1 || true
 printf 'export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/huddle-ca.crt\\n' > /etc/profile.d/99-huddle-ca.sh
 chmod 644 /etc/profile.d/99-huddle-ca.sh
+# Also export ASPIRE_ALLOW_UNSECURED_TRANSPORT from a login-shell profile (belt +
+# suspenders on top of the container Env): some IDE env-probes seed the terminal/
+# debugger from the login shell, so a profile export guarantees an IDE-launched
+# dotnet run inherits it. Fixes the Aspire dashboard gRPC UntrustedRoot (dev-cert).
+printf 'export ASPIRE_ALLOW_UNSECURED_TRANSPORT=true\\n' > /etc/profile.d/99-huddle-aspire.sh
+chmod 644 /etc/profile.d/99-huddle-aspire.sh
 
 ${IDE_CRED_SCRUB}
 
