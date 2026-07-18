@@ -93,7 +93,33 @@ the filtering socket-proxy.
 - [x] Removed orphaned credentials endpoint (noot fully retired)
 - [x] Commit incrementally; pushed to TijsVK fork
 
-## STATUS (rolling): deep adversarial pass. 10 bugs fixed; ~30 automated tests.
+## STATUS (2026-07-18): C1 host-escape MITIGATED + harness now runs the real filter.
+
+**Finding C1 (privileged nested container escapes to host) is CLOSED.** A lean
+per-devcontainer host-escape filter (`gateway/src/dind-filter.ts`) sits between the
+devcontainer and its private daemon: the sidecar dockerd listens on `inner.sock`,
+the gateway serves `docker.sock`, and the devcontainer's `DOCKER_HOST` points at
+the filter. It is a real streaming HTTP/1.1 proxy that inspects every
+`/containers/create` for device/kernel/namespace escape vectors (via the pure
+`host-config-policy.ts` `validateDindEscape`) and confirms hijacks from the RESPONSE
+(101 / docker raw-stream) before raw-tunnelling — so a create can never reach the
+daemon uninspected. Manual probing found + fixed 3 filter bugs: (1) hijacked exec
+output dropped without `allowHalfOpen`; (2) blanket bind-denial broke compose/
+testcontainers workspace mounts (DinD binds resolve against the disposable sidecar
+fs, so only socket-dir binds are refused); (3) BuildKit `/grpc` h2c upgrade
+misparsed → EOF. Binding the FILTER socket is allowed (Testcontainers Ryuk) and
+stays filtered. See `docs/dind/SECURITY-CRITICAL.md`.
+
+Cost/limitation: `--privileged`-needing tools (kind, k3d, dind-in-dind) are refused
+in DinD mode; their harness scripts now assert that limitation. The compat harness
+(`lib.sh`) now fronts the sidecar with the SHIPPED filter (`filter-runner.mjs`), so
+every tool is driven through the real guard. Escape red test
+`gateway/test/dind-compat/e2e-escape.sh` GREEN; Aspire+SqlServer e2e GREEN (DB
+answers queries through the filter); 245 gateway unit tests green (+`dind-filter`
+suite). Also hardened: MITM upstream path safeRequestPath (finding #2), audit_log
+row cap.
+
+## STATUS (earlier): deep adversarial pass. 10 bugs fixed; ~30 automated tests.
 Battery: `gateway/test/dind-compat/battery.sh` (all harness tools + real-gateway
 E2Es -> docs/dind/RESULTS.md). Harness tools: compose, testcontainers, buildx,
 privileged, k3d, kind, helm, localstack, act, devcontainer-cli, workspace,
