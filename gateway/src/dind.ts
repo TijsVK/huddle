@@ -236,7 +236,13 @@ export async function createDindSidecar(
         // outer/ (dockerd's docker.sock) shared with the devcontainer; plugin/
         // (the gateway-served authz socket) at dockerd's plugin-discovery path.
         { Type: 'bind', Source: dindOuterDir(containerName), Target: DIND_SOCKET_MOUNT },
-        { Type: 'bind', Source: dindPluginDir(containerName), Target: DIND_PLUGIN_MOUNT },
+        // READ-ONLY (review): dockerd only connects to the plugin socket, it never
+        // writes here. Under authz binds are allowed, so a nested container could
+        // `-v /run/docker/plugins:/x` and DELETE/replace huddle-authz.sock with an
+        // allow-all plugin (root bypasses dir perms) — a full authz bypass. A
+        // read-only mount blocks the write at the VFS level even for root; the
+        // gateway still writes the socket on the HOST side (its own fs).
+        { Type: 'bind', Source: dindPluginDir(containerName), Target: DIND_PLUGIN_MOUNT, ReadOnly: true },
         { Type: 'volume', Source: dindDataVolume(containerName), Target: '/var/lib/docker' },
         // Dezelfde workspace/folder-mounts als de devcontainer, op hetzelfde
         // doelpad, zodat bind-mounts van die paden in geneste containers de echte

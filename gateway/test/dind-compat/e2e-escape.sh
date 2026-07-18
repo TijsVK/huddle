@@ -100,10 +100,39 @@ else
   fail "privileged create through the bound docker.sock was NOT refused ($dood)"; rc=1
 fi
 
-# 5c. MaskedPaths unmask (finding #3): a create that clears /proc/kcore's mask
+# 5d. Plugin-socket tamper: a nested container must NOT be able to delete/replace
+#     the authz plugin socket (that would swap in an allow-all plugin → full
+#     bypass). The plugin dir is mounted READ-ONLY into the sidecar; the write
+#     must fail even via a parent/root bind (recursive-bind preserves the ro).
+tamper=0
+for src in /run/docker/plugins /run /; do
+  rel=""; [ "$src" = /run ] && rel=/docker/plugins; [ "$src" = / ] && rel=/run/docker/plugins
+  if docker exec -u vscode "$DC" docker run --rm -v "$src:/x" alpine:3.20 sh -c "rm -f /x$rel/huddle-authz.sock 2>/dev/null && ! test -e /x$rel/huddle-authz.sock" >/dev/null 2>&1; then
+    fail "nested container tampered with the authz plugin socket via $src (authz bypass)"; tamper=1; rc=1
+  fi
+done
+[ "$tamper" = 0 ] && pass "authz plugin socket is tamper-proof from nested containers (read-only)"
+
+# 5c. MaskedPaths unmask (finding #3/#4): a create that clears /proc/kcore's mask
 #     (host kernel memory) must be refused even without --privileged.
 mp=$(docker exec -u vscode "$DC" sh -c 'curl -s -o /dev/null -w "%{http_code}" --unix-socket /var/run/dind/docker.sock -X POST -H "content-type: application/json" --data "{\"Image\":\"alpine:3.20\",\"HostConfig\":{\"MaskedPaths\":[]}}" http://x/v1.43/containers/create 2>/dev/null' 2>/dev/null | tr -d '[:space:]')
-[ "$mp" = 403 ] && pass "MaskedPaths unmask refused (finding #3)" || { fail "MaskedPaths unmask not refused (HTTP $mp)"; rc=1; }
+[ "$mp" = 403 ] && pass "MaskedPaths unmask refused (finding #3/#4)" || { fail "MaskedPaths unmask not refused (HTTP $mp)"; rc=1; }
+
+# 5e. Case-insensitive bypass (finding #1): dockerd matches JSON keys
+#     case-insensitively, so a lowercase-keyed privileged create must be denied.
+cb=$(docker exec -u vscode "$DC" sh -c 'curl -s -o /dev/null -w "%{http_code}" --unix-socket /var/run/dind/docker.sock -X POST -H "content-type: application/json" --data "{\"Image\":\"alpine:3.20\",\"hostconfig\":{\"privileged\":true}}" http://x/v1.43/containers/create 2>/dev/null' 2>/dev/null | tr -d '[:space:]')
+[ "$cb" = 403 ] && pass "lowercase-key privileged create refused (finding #1)" || { fail "case-variant create not refused (HTTP $cb)"; rc=1; }
+
+# 5f. Host kernel bind (finding #3): binding the privileged sidecar's /proc/sys
+#     lets a nested container write the HOST's core_pattern → host root. Must be
+#     refused; and the host core_pattern must be UNCHANGED after the attempt.
+before=$(cat /proc/sys/kernel/core_pattern 2>/dev/null)
+docker exec -u vscode "$DC" docker run --rm -v /proc/sys:/ps alpine:3.20 sh -c 'echo "|pwned|" > /ps/kernel/core_pattern' >/dev/null 2>&1
+after=$(cat /proc/sys/kernel/core_pattern 2>/dev/null)
+if docker exec -u vscode "$DC" docker run --rm -v /proc/sys:/ps alpine:3.20 true >/dev/null 2>&1; then
+  fail "/proc/sys bind ALLOWED (host kernel escape vector open)"; rc=1
+else pass "/proc/sys (host kernel) bind refused"; fi
+[ "$before" = "$after" ] && pass "host core_pattern unchanged by nested bind attempt" || { fail "HOST ESCAPE — core_pattern changed ($before -> $after)"; rc=1; }
 
 # 6. A benign (non-socket) host-path bind MUST still be forwarded — the DinD
 #    compat win (compose/testcontainers workspace mounts). It resolves against the

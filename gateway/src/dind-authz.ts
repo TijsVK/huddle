@@ -21,7 +21,7 @@
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
-import { validateDindEscape, validateExecEscape } from './host-config-policy';
+import { validateDindEscape, validateExecEscape, lowerKeysDeep } from './host-config-policy';
 
 const authzServers = new Map<string, http.Server>();
 
@@ -58,13 +58,15 @@ export function authorize(req: AuthZReq): string | null {
     // A create always carries a JSON body. If dockerd didn't hand us one, we
     // cannot inspect it — fail CLOSED rather than allow an unseen HostConfig.
     if (body === undefined) return 'container create body not available for inspection';
-    return validateDindEscape(body.HostConfig);
+    // dockerd matches keys case-insensitively, so extract HostConfig the same way
+    // (finding #1) — `body.HostConfig` alone misses {"hostconfig":{...}}.
+    return validateDindEscape(lowerKeysDeep(body).hostconfig);
   }
   // Exec-create: Privileged/CapAdd live at the top level of the body.
   if (method === 'POST' && /^\/containers\/[^/]+\/exec$/.test(uri)) {
     const body = decodeBody(req.RequestBody);
     if (body === undefined) return null; // exec without a body can't set Privileged
-    return validateExecEscape(body);
+    return validateExecEscape(body); // lowercases keys internally
   }
   return null;
 }

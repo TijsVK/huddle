@@ -26,8 +26,18 @@ describe('dind-authz authorize()', () => {
   it('denies a --device create', () => {
     expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Devices: [{ PathOnHost: '/dev/sda' }] } }))).toMatch(/Devices/);
   });
-  it('ALLOWS host-path binds (safe under authz — resolves to the sidecar fs)', () => {
-    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Binds: ['/etc:/h', '/var/run/dind/docker.sock:/s'] } }))).toBeNull();
+  it('ALLOWS ordinary host-path binds (workspace/etc + the authz-guarded docker.sock)', () => {
+    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Binds: ['/etc:/h', '/home/vscode/proj:/w', '/var/run/dind/docker.sock:/s'] } }))).toBeNull();
+  });
+  // finding #3: the privileged sidecar's /proc,/sys,/dev are the HOST's — a
+  // /proc/sys bind lets a nested container write core_pattern → host root.
+  it.each([
+    '/proc/sys', '/proc', '/sys', '/sys/kernel', '/dev', '/dev/mem', '/', '/proc/sys/../sys',
+  ])('denies a bind of host kernel path %s', (src) => {
+    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Binds: [`${src}:/x`] } }))).toMatch(/host kernel path/);
+  });
+  it('denies a host-kernel bind expressed as a Mount', () => {
+    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Mounts: [{ Type: 'bind', Source: '/proc/sys', Target: '/x' }] } }))).toMatch(/host kernel path/);
   });
   it('fails CLOSED when a create carries no inspectable body', () => {
     expect(authorize(req('POST', '/v1.45/containers/create'))).toMatch(/not available/);
@@ -41,6 +51,22 @@ describe('dind-authz authorize()', () => {
     '/v1.45/containers%2fcreate',
   ])('inspects a create reached via %s', (uri) => {
     expect(authorize(req('POST', uri, { HostConfig: { Privileged: true } }))).toMatch(/Privileged/);
+  });
+
+  // CRITICAL finding #1: dockerd matches JSON keys case-insensitively, so a
+  // lowercase-keyed create must still be inspected and denied.
+  it.each([
+    { hostconfig: { privileged: true } },
+    { HostConfig: { PRIVILEGED: true } },
+    { HOSTCONFIG: { Privileged: true } },
+    { hostconfig: { capadd: ['SYS_ADMIN'] } },
+    { hostconfig: { devices: [{ pathonhost: '/dev/sda' }] } },
+    { hostconfig: { pidmode: 'host' } },
+  ])('denies case-variant escape create %o', (body) => {
+    expect(authorize(req('POST', '/v1.45/containers/create', body))).toBeTruthy();
+  });
+  it('denies a case-variant privileged exec', () => {
+    expect(authorize(req('POST', '/v1.45/containers/x/exec', { PRIVILEGED: true }))).toBeTruthy();
   });
 
   it('denies a privileged exec-create (finding #7)', () => {
@@ -62,9 +88,19 @@ describe('dind-authz authorize()', () => {
 });
 
 describe('validateDindEscape / validateExecEscape (findings #3/#7/#8)', () => {
-  it('denies MaskedPaths / ReadonlyPaths overrides (#3)', () => {
+  it('denies MaskedPaths / ReadonlyPaths that drop ANY default (#3/#4)', () => {
     expect(validateDindEscape({ MaskedPaths: [] })).toMatch(/MaskedPaths/);
     expect(validateDindEscape({ ReadonlyPaths: [] })).toMatch(/ReadonlyPaths/);
+    // keeps /proc/kcore but drops the rest → still denied (superset required)
+    expect(validateDindEscape({ MaskedPaths: ['/proc/kcore'] })).toMatch(/MaskedPaths/);
+    expect(validateDindEscape({ ReadonlyPaths: ['/proc/sysrq-trigger'] })).toMatch(/ReadonlyPaths/);
+  });
+  it('allows null MaskedPaths/ReadonlyPaths (daemon defaults) and the full set', () => {
+    expect(validateDindEscape({ MaskedPaths: null, ReadonlyPaths: null })).toBeNull();
+    expect(validateDindEscape({
+      MaskedPaths: ['/proc/asound', '/proc/acpi', '/proc/kcore', '/proc/keys', '/proc/latency_stats', '/proc/timer_list', '/proc/sched_debug', '/proc/scsi', '/sys/firmware', '/sys/devices/virtual/powercap'],
+      ReadonlyPaths: ['/proc/bus', '/proc/fs', '/proc/irq', '/proc/sys', '/proc/sysrq-trigger'],
+    })).toBeNull();
   });
   it('denies a custom (non-default) seccomp/apparmor profile (#8)', () => {
     expect(validateDindEscape({ SecurityOpt: ['seccomp={"defaultAction":"SCMP_ACT_ALLOW"}'] })).toMatch(/SecurityOpt/);

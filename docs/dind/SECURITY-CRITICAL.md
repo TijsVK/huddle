@@ -47,21 +47,46 @@ there is no second, unfiltered path to reach.
   `inner.sock`** — the devcontainer talks to `docker.sock` directly and dockerd
   enforces authz on it. The plugin socket speaks the authz protocol only (useless
   as a docker client), so reaching it grants nothing.
-- On `POST /containers/create` the plugin runs `validateDindEscape(HostConfig)`
-  and denies (`403`) the **device/kernel/namespace** vectors: `Privileged`,
-  `Devices`/`DeviceCgroupRules`/`DeviceRequests`, `CapAdd`, host `PidMode`/
-  `IpcMode`/`UsernsMode`/`CgroupnsMode`/`UTSMode`, `CgroupParent`, `Sysctls`,
-  per-device Blkio limits, non-default `SecurityOpt` (any custom seccomp/apparmor,
-  not just literal `unconfined` — finding #8), and an **unmask of the default
-  MaskedPaths/ReadonlyPaths** (`/proc/kcore`, `/proc/sysrq-trigger` — finding #3).
+- The plugin decodes the request body and inspects it with **case-insensitive**
+  keys — dockerd's Go JSON decoder matches struct fields case-insensitively, so
+  `{"hostconfig":{"privileged":true}}` would otherwise slip past a case-sensitive
+  check while dockerd still applies it (finding #1, verified live). All keys are
+  deep-lowercased before inspection.
+- On `POST /containers/create` `validateDindEscape` denies (`403`) the
+  **device/kernel/namespace** vectors: `Privileged`, `Devices`/`DeviceCgroupRules`/
+  `DeviceRequests`, `CapAdd`, host `PidMode`/`IpcMode`/`UsernsMode`/`CgroupnsMode`/
+  `UTSMode`, `CgroupParent`, `Sysctls`, per-device Blkio limits, non-default
+  `SecurityOpt` (any custom seccomp/apparmor, not just literal `unconfined` —
+  finding #8), and any **MaskedPaths/ReadonlyPaths that is not a superset of runc's
+  defaults** (an unmask of `/proc/kcore`, `/sys/firmware`, `/proc/sysrq-trigger`, …
+  — findings #3/#4; `null`/omitted is fine, the daemon applies defaults).
+- **Host-kernel binds are denied** (finding #3): the sidecar is `--privileged`, so
+  its `/proc`, `/sys`, `/dev` are the HOST's *writable* kernel interfaces. A
+  nested `-v /proc/sys:/x` then `echo … > /x/kernel/core_pattern` sets the host's
+  core-dump handler → **host root** (verified live). The plugin refuses any bind
+  whose source is `/proc`, `/sys`, `/dev` or `/`. Ordinary binds (workspace, `/etc`,
+  the authz-guarded `docker.sock` for Ryuk) stay allowed.
 - On `POST /containers/{id}/exec` it runs `validateExecEscape` (privileged/CapAdd
   exec — finding #7). The request path is normalized (version prefix, `//`,
   percent-encoding) before matching so a crafted create path can't dodge
   inspection (finding #6).
-- **Binds/Mounts/VolumesFrom are fully ALLOWED** — under authz there is no
-  unfiltered socket, so binding the docker socket (Testcontainers Ryuk / docker-
-  outside-of-docker) just yields another authz-guarded client, and a host-path
-  bind resolves against the disposable sidecar fs. No bind guard is needed.
+
+### Residual (known limitation)
+The host-kernel-bind deny is by **lexical source path**. A devcontainer that has a
+writable *shared* mount (its workspace) could plant a symlink there pointing at
+`/proc/sys` and bind the symlink, which dockerd resolves on the sidecar fs — the
+plugin sees only the (allowed) symlink path. Closing this fully needs either
+dropping host-path binds entirely (breaks compose workspace mounts) or mounting the
+shared workspace `nosymfollow` into the sidecar — tracked as future hardening. The
+DIRECT bind attack (the practical exploit) is closed.
+
+The plugin dir is mounted **read-only** into the sidecar: dockerd only connects to
+the socket, never writes there. Without this, a nested container (binds are
+allowed) could `-v /run/docker/plugins:/x` and delete/replace `huddle-authz.sock`
+with an allow-all plugin — root bypasses dir perms, but a read-only mount blocks
+the write at the VFS level even through a parent/root bind (recursive-bind
+preserves the ro). Verified live: `rm` fails "Read-only file system" via
+`/run/docker/plugins`, `/run`, and `/`.
 
 Because dockerd handles the request stream natively, the old proxy's hijack/
 half-open/chunked-parsing complexity is gone (findings #4/#5/#6 dissolve).

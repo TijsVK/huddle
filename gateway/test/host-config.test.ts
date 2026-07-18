@@ -67,7 +67,10 @@ describe('validateHostConfig', () => {
       LogConfig: { Type: 'json-file', Config: {} },
       Binds: null, VolumesFrom: [], CapAdd: [], CapDrop: [], Devices: [],
       DeviceCgroupRules: [], Privileged: false, IpcMode: 'private',
-      MaskedPaths: ['/proc/kcore'], ReadonlyPaths: ['/proc/sysrq-trigger'],
+      // A normal `docker run` omits MaskedPaths/ReadonlyPaths (null) so the daemon
+      // applies its defaults — that must be allowed. (An explicit, SHRUNK list is
+      // an unmask and is denied; see the dedicated finding-#3/#4 tests.)
+      MaskedPaths: null, ReadonlyPaths: null,
       Ulimits: [{ Name: 'nofile', Soft: 1024, Hard: 2048 }],
       AutoRemove: true,
     });

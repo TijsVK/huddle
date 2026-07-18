@@ -63,7 +63,7 @@ up() {
   # at dockerd's discovery path /run/docker/plugins).
   docker run -d --name "$dind" --privileged \
     --network "container:${dc}" \
-    -v "$outerdir":/var/run/dind -v "$plugindir":/run/docker/plugins -v "$data":/var/lib/docker -v "$work":/work \
+    -v "$outerdir":/var/run/dind -v "$plugindir":/run/docker/plugins:ro -v "$data":/var/lib/docker -v "$work":/work \
     -e DOCKER_TLS_CERTDIR= \
     "$DIND_IMAGE" sh -c 'if [ -f /sys/fs/cgroup/cgroup.controllers ]; then mkdir -p /sys/fs/cgroup/init 2>/dev/null||true; xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null||true; sed -e "s/ / +/g" -e "s/^/+/" < /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null||true; fi; dockerd --host=unix:///var/run/dind/docker.sock --authorization-plugin=huddle-authz --mtu=1400 & DPID=$!; i=0; while [ ! -S /var/run/dind/docker.sock ] && [ $i -lt 120 ]; do sleep 0.5; i=$((i+1)); done; chmod 0666 /var/run/dind/docker.sock 2>/dev/null || true; (while true; do chmod 0666 /var/run/dind/docker.sock 2>/dev/null; sleep 2; done) & wait $DPID' >/dev/null \
     || { fail "$name: dind sidecar failed to start"; return 1; }
