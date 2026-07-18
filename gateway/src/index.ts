@@ -24,6 +24,13 @@ process.on('uncaughtException', (err: NodeJS.ErrnoException) => {
   process.exit(1);
 });
 
+// An unhandled promise rejection (e.g. a URIError thrown deep in a request
+// handler) must not silently terminate the gateway and take every devcontainer's
+// egress + Docker access down. Log and keep serving.
+process.on('unhandledRejection', (reason: any) => {
+  console.error('[proxy] unhandled rejection (kept alive):', reason?.message ?? reason);
+});
+
 const SOCKET_DIR = '/tmp/dc-sockets';
 
 initDb();

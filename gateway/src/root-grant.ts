@@ -29,15 +29,26 @@ function scheduleRevoke(container: string, until: number): void {
   clearTimer(container);
   if (isPermanentUntil(until)) return; // permanent: nooit intrekken
   const delay = until * 1000 - Date.now();
-  if (delay <= 0) { void doRevoke(container); return; }
-  const t = setTimeout(() => {
-    if (until * 1000 - Date.now() > 0) { scheduleRevoke(container, until); return; }
-    void doRevoke(container);
-  }, Math.min(delay, MAX_DELAY_MS));
+  if (delay <= 0) { expireIfDue(container); return; }
+  const t = setTimeout(() => expireIfDue(container), Math.min(delay, MAX_DELAY_MS));
   if (typeof t.unref === 'function') t.unref();
   timers.set(container, t);
 }
 
+// Timer-driven expiry: re-read the DB (the grant may have been EXTENDED or made
+// permanent since this timer was armed — e.g. an extend that landed during a
+// prior revoke's await). Only revoke if it is genuinely still past-due.
+function expireIfDue(container: string): void {
+  const g = getRootGrant(container);
+  if (!g) { clearTimer(container); return; }        // already revoked/deleted
+  if (isPermanentUntil(g.until) || g.until * 1000 - Date.now() > 0) {
+    scheduleRevoke(container, g.until);             // extended/permanent → keep
+    return;
+  }
+  void doRevoke(container);
+}
+
+// Unconditional revoke (explicit portal revoke, or a confirmed expiry).
 async function doRevoke(container: string): Promise<void> {
   clearTimer(container);
   deleteRootGrant(container);

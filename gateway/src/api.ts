@@ -7,6 +7,7 @@ import { stateEvents, notifyStateChanged } from './events';
 import fastifyStatic from '@fastify/static';
 import { db, getAllGrants, setGrant, deleteGrant, getGrant, PERMANENT_UNTIL, isPermanentUntil, getAllRootGrants, setActionPolicy, logAudit, getAirlocked, setAirlocked, getSetting, setSetting, listFolderMappings, getFolderMapping, createFolderMapping, updateFolderMapping, deleteFolderMapping, FolderMapping, listApprovedHostPorts, addApprovedHostPort, removeApprovedHostPort, ApprovedHostPort } from './db';
 import { applyRootGrant, revokeRootGrant, rootGrantStatus } from './root-grant';
+import { removeDindSidecar } from './dind';
 import { DOCKER_ACTIONS, getEffectivePolicies, isKnownAction } from './docker-actions';
 import {
   listDevcontainers,
@@ -539,6 +540,9 @@ export async function createApiServer(): Promise<FastifyInstance> {
     const { name } = req.params;
     try {
       const inspect = await inspectContainer(name);
+      // Sidecar first: it shares the devcontainer's netns, so removing the
+      // devcontainer while the sidecar is attached can be refused and leak it.
+      await removeDindSidecar(name);
       await forceDeleteContainer(inspect.Id);
       await cleanupContainerNetwork(name);
       notifyStateChanged();
@@ -630,7 +634,7 @@ export async function createApiServer(): Promise<FastifyInstance> {
       const { container } = req.params;
       const { minutes, permanent } = req.body ?? {};
       let until: number;
-      if (permanent) {
+      if (permanent === true) {
         until = PERMANENT_UNTIL;
       } else {
         if (!minutes || minutes < 1 || minutes > 120) {

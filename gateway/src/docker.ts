@@ -1090,6 +1090,12 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
 export async function migrateContainer(containerName: string): Promise<{ id: string; mode: string }> {
   const inspect = await inspectContainer(containerName);
   const labels: Record<string, string> = inspect?.Config?.Labels ?? {};
+  // Guard: only migrate an actual Huddle devcontainer. Without this, a typo or a
+  // non-devcontainer name would be force-deleted and recreated as a bogus empty
+  // devcontainer over it.
+  if (!labels['com.intellij.devcontainer.id']) {
+    throw new Error(`'${containerName}' is not a Huddle devcontainer (missing devcontainer.id label); refusing to migrate`);
+  }
   const ideRaw = labels['com.devcontainer.ide'];
   const ideName: IdeName = isIdeName(ideRaw) ? ideRaw : (ideFromContainerLabels(labels) ?? 'intellij');
   const workspaceDir = labels['com.intellij.devcontainer.sources.path'] ?? '';
@@ -1100,9 +1106,14 @@ export async function migrateContainer(containerName: string): Promise<{ id: str
   if (!imageName) throw new Error(`cannot determine image for '${containerName}'`);
   const hc = inspect?.HostConfig ?? {};
   const memory = hc.Memory ? String(hc.Memory) : undefined;
-  const cpus = hc.CpuQuota && hc.CpuPeriod ? String(hc.CpuQuota / hc.CpuPeriod) : undefined;
+  // Only a positive quota is a real cpu limit (CpuQuota=-1 means unlimited).
+  const cpus = hc.CpuQuota > 0 && hc.CpuPeriod > 0 ? String(hc.CpuQuota / hc.CpuPeriod) : undefined;
 
   console.log(`[migrate] recreating ${containerName} in ${DIND_ENABLED ? 'DinD' : 'classic'} mode`);
+  // Remove the sidecar FIRST: it shares the devcontainer's netns
+  // (--network container:X), so removing the devcontainer while the sidecar is
+  // attached can be refused and would leak the privileged sidecar + its volumes.
+  await removeDindSidecar(containerName);
   await forceDeleteContainer(containerName);
   await cleanupContainerNetwork(containerName);
 

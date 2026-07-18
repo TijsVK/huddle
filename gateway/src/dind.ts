@@ -53,14 +53,31 @@ async function ensureImage(image: string): Promise<void> {
     await dockerRequest('GET', `/images/${encodeURIComponent(image)}/json`);
     return;
   } catch {}
-  // Splits repo:tag alleen op een `:` ná de laatste `/` (zodat registry:port
-  // intact blijft). Geen tag → latest.
-  const lastSlash = image.lastIndexOf('/');
-  const colon = image.indexOf(':', lastSlash + 1);
-  const repo = colon === -1 ? image : image.slice(0, colon);
-  const tag = colon === -1 ? 'latest' : image.slice(colon + 1);
+  // Digest ref (`repo@sha256:…`) → pull the whole ref, no separate tag.
+  // Otherwise split repo:tag only on a `:` AFTER the last `/` (so registry:port
+  // stays intact). No tag → latest.
+  let query: string;
+  if (image.includes('@')) {
+    query = `fromImage=${encodeURIComponent(image)}`;
+  } else {
+    const lastSlash = image.lastIndexOf('/');
+    const colon = image.indexOf(':', lastSlash + 1);
+    const repo = colon === -1 ? image : image.slice(0, colon);
+    const tag = colon === -1 ? 'latest' : image.slice(colon + 1);
+    query = `fromImage=${encodeURIComponent(repo)}&tag=${encodeURIComponent(tag)}`;
+  }
   console.log(`[dind] pulling ${image} ...`);
-  await dockerRequest('POST', `/images/create?fromImage=${encodeURIComponent(repo)}&tag=${encodeURIComponent(tag)}`);
+  const out = await dockerRequest('POST', `/images/create?${query}`);
+  // The pull stream returns HTTP 200 even on failure; a mid-stream {"error":…}
+  // line (auth failure, proxy block, unknown tag) must be treated as a failure —
+  // otherwise the sidecar starts with a non-functional daemon.
+  const text = typeof out === 'string' ? out : JSON.stringify(out ?? '');
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let obj: any;
+    try { obj = JSON.parse(line); } catch { continue; }
+    if (obj && obj.error) throw new Error(`image pull failed for ${image}: ${obj.error}`);
+  }
   console.log(`[dind] pulled ${image}`);
 }
 
@@ -151,7 +168,7 @@ export async function createDindSidecar(
     `update-ca-certificates 2>/dev/null || cat /usr/local/share/ca-certificates/huddle-ca.crt >> /etc/ssl/certs/ca-certificates.crt; ` +
     cgroupPrep +
     `dockerd --host=unix://${DIND_SOCKET_PATH} --mtu=1400 & DPID=$!; ` +
-    `i=0; while [ ! -S ${DIND_SOCKET_PATH} ] && [ $i -lt 120 ]; do sleep 0.5; i=$((i+1)); done; ` +
+    `i=0; while [ ! -S ${DIND_SOCKET_PATH} ] && [ $i -lt 240 ]; do sleep 0.5; i=$((i+1)); done; ` +
     `chmod 0666 ${DIND_SOCKET_PATH} 2>/dev/null || true; wait $DPID`,
   ];
 

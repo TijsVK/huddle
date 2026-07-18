@@ -11,6 +11,24 @@ import { logAudit, updateAuditResponse } from './db';
 import { signLeafCert } from './tls-ca';
 import { storeTokenExchange, resolveToken, isPlaceholderToken } from './token-exchange';
 
+// Node's http client throws ERR_UNESCAPED_CHARACTERS (synchronously, at
+// http.request()) when the request path contains characters outside !-ÿ — a
+// space, a non-latin1 char, an emoji. A devcontainer sending such a path must
+// NOT be able to crash the whole gateway, so percent-encode those characters.
+// Already-encoded %xx sequences are ASCII and pass through untouched. The regex
+// MUST use the `u` flag: without it, an astral-plane char (e.g. a decoded emoji,
+// which normalizePathname produces via decodeURIComponent) matches as two lone
+// surrogates and encodeURIComponent('\uD83D') itself throws URIError — the exact
+// crash we're preventing. try/catch is a final backstop.
+export function safeRequestPath(p: string): string {
+  try {
+    return p.replace(/[^!-ÿ]/gu, (c) => encodeURIComponent(c));
+  } catch {
+    // Last resort: strip anything outside the safe range rather than crash.
+    return p.replace(/[^!-ÿ]/gu, '');
+  }
+}
+
 const PROXY_PORT = 80;
 
 // Domains die de MITM overslaan (raw TCP-tunnel houden). Voor clients met
@@ -196,16 +214,7 @@ export function createProxyServer(): http.Server {
       send403(res, host, 'deny', containerId);
       return;
     }
-    // Node's http client throws ERR_UNESCAPED_CHARACTERS (synchronously, at
-    // http.request()) when the request path contains characters outside
-    // !-ÿ — e.g. a space or a non-latin1 char. A devcontainer (or a
-    // tool like Aspire/DCP) sending such a path must NOT be able to crash the
-    // whole gateway, so percent-encode those characters here. Already-encoded
-    // %xx sequences are ASCII and pass through untouched.
-    const forwardPath = `${normPath}${target.search}`.replace(
-      /[^!-ÿ]/g,
-      (c) => encodeURIComponent(c),
-    );
+    const forwardPath = safeRequestPath(`${normPath}${target.search}`);
 
     let ruleId: number | null;
     if (host === 'huddle') {
