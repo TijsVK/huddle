@@ -24,19 +24,33 @@
 // container via de docker-client-config (proxies.default), zodat http(s)_proxy
 // automatisch goed staat.
 
+import fs from 'fs';
 import { dockerRequest } from './docker';
 import { getCaCertPem } from './tls-ca';
+import { createDindFilter, removeDindFilter } from './dind-filter';
 
 const DIND_IMAGE = process.env.HUDDLE_DIND_IMAGE ?? 'docker:28-dind';
 
-// Pad (in de gedeelde volume) waar de private daemon zijn unix-socket neerzet.
-// Zowel de sidecar als de devcontainer mounten deze volume op /var/run/dind.
+// Socket topology (C1 mitigation): the sidecar dockerd listens on `inner.sock`
+// and the gateway runs a host-escape FILTER (dind-filter.ts) that serves
+// `docker.sock`; the devcontainer's DOCKER_HOST points at the filter. Both live
+// in the shared host dir /tmp/dc-sockets/<name> (the one dir the long-running
+// gateway can reach), mounted at /var/run/dind in the sidecar AND the devcontainer.
+export const SOCKET_DIR = '/tmp/dc-sockets';
 export const DIND_SOCKET_MOUNT = '/var/run/dind';
-export const DIND_SOCKET_PATH = `${DIND_SOCKET_MOUNT}/docker.sock`;
+export const DIND_SOCKET_PATH = `${DIND_SOCKET_MOUNT}/docker.sock`;   // filter (devcontainer-facing)
+export const DIND_INNER_SOCK_PATH = `${DIND_SOCKET_MOUNT}/inner.sock`; // sidecar dockerd
 export const DIND_DOCKER_HOST = `unix://${DIND_SOCKET_PATH}`;
 
-export function dindSockVolume(containerName: string): string {
-  return `huddle-dind-sock-${containerName}`;
+// Per-container socket dir on the host (== gateway's /tmp/dc-sockets/<name>).
+export function dindSockDir(containerName: string): string {
+  return `${SOCKET_DIR}/${containerName}`;
+}
+export function dindFilterSockPath(containerName: string): string {
+  return `${dindSockDir(containerName)}/docker.sock`;
+}
+export function dindInnerSockPath(containerName: string): string {
+  return `${dindSockDir(containerName)}/inner.sock`;
 }
 export function dindDataVolume(containerName: string): string {
   return `huddle-dind-data-${containerName}`;
@@ -92,10 +106,12 @@ async function ensureVolume(name: string, parent: string): Promise<void> {
   }
 }
 
-// De gedeelde socket-volume moet bestaan vóór de devcontainer start (die mount
-// hem op /var/run/dind). Aangeroepen vanuit createAndStartContainer.
+// De gedeelde socket-DIR (host-bind, geen named volume) moet bestaan vóór de
+// devcontainer start: de gateway moet inner.sock kunnen bereiken om er de
+// host-escape filter voor te zetten. Aangeroepen vanuit createAndStartContainer.
 export async function ensureDindSockVolume(containerName: string): Promise<void> {
-  await ensureVolume(dindSockVolume(containerName), containerName);
+  try { fs.mkdirSync(dindSockDir(containerName), { recursive: true, mode: 0o777 }); } catch {}
+  try { fs.chmodSync(dindSockDir(containerName), 0o777); } catch {}
 }
 
 // Proxy-env voor geneste containers wordt NIET hier (in de sidecar) gezet: het
@@ -167,9 +183,9 @@ export async function createDindSidecar(
     `echo "$HUDDLE_CA_B64" | base64 -d > /usr/local/share/ca-certificates/huddle-ca.crt; ` +
     `update-ca-certificates 2>/dev/null || cat /usr/local/share/ca-certificates/huddle-ca.crt >> /etc/ssl/certs/ca-certificates.crt; ` +
     cgroupPrep +
-    `dockerd --host=unix://${DIND_SOCKET_PATH} --mtu=1400 & DPID=$!; ` +
-    `i=0; while [ ! -S ${DIND_SOCKET_PATH} ] && [ $i -lt 240 ]; do sleep 0.5; i=$((i+1)); done; ` +
-    `chmod 0666 ${DIND_SOCKET_PATH} 2>/dev/null || true; wait $DPID`,
+    `dockerd --host=unix://${DIND_INNER_SOCK_PATH} --mtu=1400 & DPID=$!; ` +
+    `i=0; while [ ! -S ${DIND_INNER_SOCK_PATH} ] && [ $i -lt 240 ]; do sleep 0.5; i=$((i+1)); done; ` +
+    `chmod 0666 ${DIND_INNER_SOCK_PATH} 2>/dev/null || true; wait $DPID`,
   ];
 
   const createBody = {
@@ -196,7 +212,9 @@ export async function createDindSidecar(
       NetworkMode: `container:${devcontainerId}`,
       Privileged: true,
       Mounts: [
-        { Type: 'volume', Source: dindSockVolume(containerName), Target: DIND_SOCKET_MOUNT },
+        // Shared host socket dir (bind), NOT a named volume: the gateway must be
+        // able to reach inner.sock to run the host-escape filter in front of it.
+        { Type: 'bind', Source: dindSockDir(containerName), Target: DIND_SOCKET_MOUNT },
         { Type: 'volume', Source: dindDataVolume(containerName), Target: '/var/lib/docker' },
         // Dezelfde workspace/folder-mounts als de devcontainer, op hetzelfde
         // doelpad, zodat bind-mounts van die paden in geneste containers de echte
@@ -218,16 +236,29 @@ export async function createDindSidecar(
   await dockerRequest('POST', `/containers/${id}/start`, {});
 
   console.log(`[dind] sidecar ${name} started (netns of ${containerName})`);
+
+  // Wacht tot dockerd's inner.sock bestaat, zet er dan de host-escape filter
+  // (C1) voor. De devcontainer's DOCKER_HOST wijst naar de filter-socket, niet
+  // rechtstreeks naar inner.sock.
+  const innerHostPath = dindInnerSockPath(containerName);
+  for (let i = 0; i < 240 && !fs.existsSync(innerHostPath); i++) {
+    await new Promise(r => setTimeout(r, 500));
+  }
+  if (!fs.existsSync(innerHostPath)) {
+    console.warn(`[dind] inner.sock not present for ${containerName} after wait; filter not started`);
+  } else {
+    await createDindFilter(containerName, dindFilterSockPath(containerName), innerHostPath);
+  }
   return id;
 }
 
 // Sidecar + zijn volumes verwijderen wanneer de devcontainer wordt opgeruimd.
 export async function removeDindSidecar(containerName: string): Promise<void> {
   const name = dindContainerName(containerName);
+  removeDindFilter(containerName);
   try { await dockerRequest('DELETE', `/containers/${encodeURIComponent(name)}?force=true`); } catch {}
-  for (const vol of [dindSockVolume(containerName), dindDataVolume(containerName)]) {
-    try { await dockerRequest('DELETE', `/volumes/${encodeURIComponent(vol)}?force=true`); } catch {}
-  }
+  try { await dockerRequest('DELETE', `/volumes/${encodeURIComponent(dindDataVolume(containerName))}?force=true`); } catch {}
+  try { fs.rmSync(dindSockDir(containerName), { recursive: true, force: true }); } catch {}
 }
 
 // Leid de te delen mounts (workspace + folder-mappings) af uit de devcontainer
@@ -254,9 +285,23 @@ export async function ensureDindSidecar(containerName: string, devcontainerId: s
   const name = dindContainerName(containerName);
   try {
     const info = await dockerRequest('GET', `/containers/${encodeURIComponent(name)}/json`);
-    if (info?.State?.Running) return;
-    await dockerRequest('POST', `/containers/${encodeURIComponent(name)}/start`, {});
-    console.log(`[dind] sidecar ${name} restarted`);
+    if (!info?.State?.Running) {
+      await dockerRequest('POST', `/containers/${encodeURIComponent(name)}/start`, {});
+      console.log(`[dind] sidecar ${name} restarted`);
+    }
+    // De sidecar overleeft een gateway-herstart (RestartPolicy), maar de
+    // host-escape FILTER draait in het gateway-proces en is dan weg (de oude
+    // docker.sock is een dode inode). Herstel hem altijd zodat DOCKER_HOST van
+    // de devcontainer weer werkt na een herstart.
+    const innerHostPath = dindInnerSockPath(containerName);
+    for (let i = 0; i < 240 && !fs.existsSync(innerHostPath); i++) {
+      await new Promise(r => setTimeout(r, 500));
+    }
+    if (fs.existsSync(innerHostPath)) {
+      await createDindFilter(containerName, dindFilterSockPath(containerName), innerHostPath);
+    } else {
+      console.warn(`[dind] inner.sock missing for ${containerName}; filter not restored`);
+    }
   } catch {
     const shared = await sharedMountsFromDevcontainer(devcontainerId);
     await createDindSidecar(containerName, devcontainerId, shared);

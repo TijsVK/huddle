@@ -6,7 +6,7 @@ import {
   createDindSidecar,
   ensureDindSockVolume,
   removeDindSidecar,
-  dindSockVolume,
+  dindSockDir,
   DIND_SOCKET_MOUNT,
   DIND_DOCKER_HOST,
   DIND_SOCKET_PATH,
@@ -996,11 +996,12 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
     }]),
     ...(DIND_ENABLED
       ? [{
-          // DinD: de private-daemon-socket komt uit de gedeelde volume die ook
-          // de dind-sidecar mount. De sidecar (dind.ts) zet dockerd's socket op
-          // ${DIND_SOCKET_PATH}.
-          Type: 'volume' as const,
-          Source: dindSockVolume(containerName),
+          // DinD: mount de gedeelde socket-DIR (host-bind) die de sidecar én de
+          // gateway-filter delen. De devcontainer's DOCKER_HOST wijst naar de
+          // filter-socket ${DIND_SOCKET_PATH} (host-escape guard, finding C1),
+          // niet rechtstreeks naar dockerd's inner.sock.
+          Type: 'bind' as const,
+          Source: dindSockDir(containerName),
           Target: DIND_SOCKET_MOUNT,
         }]
       : [{

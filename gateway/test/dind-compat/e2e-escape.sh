@@ -56,8 +56,27 @@ if printf '%s' "$esc" | grep -qF "$HOST_HN"; then
   fail "HOST ESCAPE — nested container mounted a host disk and read host hostname ($esc)"; rc=1
 else pass "nested container cannot mount/read the host filesystem"; fi
 
-# 4. Host-path bind of a sensitive path must be refused/confined.
+# 4. Host-path bind of the host root must not reach the real host fs (in DinD it
+#    resolves to the disposable sidecar root, and `/` is refused anyway as an
+#    ancestor of the daemon socket dir).
 hb=$(docker exec -u vscode "$DC" docker run --rm -v /:/hostroot:ro alpine:3.20 cat /hostroot/etc/hostname 2>/dev/null | tr -d '[:space:]')
 [ "$hb" = "$HOST_HN" ] && { fail "host-path bind reached the host root ($hb)"; rc=1; } || pass "host-path bind does not reach the host root"
+
+# 5. Filter-bypass: binding the private daemon's socket dir would let a nested
+#    container talk to the UNFILTERED dockerd and then run --privileged. Must be
+#    refused for the dir, its ancestors, and the /run symlink alias.
+bypass=0
+for src in /var/run/dind /run/dind /var/run /run /; do
+  if docker exec -u vscode "$DC" docker run --rm -v "$src:/d" alpine:3.20 sh -c 'test -S /d/inner.sock' >/dev/null 2>&1; then
+    fail "socket-dir bypass via $src reached inner.sock"; bypass=1; rc=1
+  fi
+done
+[ "$bypass" = 0 ] && pass "no socket-dir bind reaches the unfiltered daemon (filter bypass closed)"
+
+# 6. A benign (non-socket) host-path bind MUST still be forwarded — the DinD
+#    compat win (compose/testcontainers workspace mounts). It resolves against the
+#    sidecar fs; reading the sidecar's own /etc/alpine-release proves it works.
+ok=$(docker exec -u vscode "$DC" docker run --rm -v /etc/alpine-release:/x:ro alpine:3.20 cat /x 2>/dev/null | tr -d '[:space:]')
+[ -n "$ok" ] && pass "benign host-path bind still forwarded (compose/testcontainers compat: $ok)" || { fail "benign host-path bind was blocked (compat regression)"; rc=1; }
 
 exit $rc

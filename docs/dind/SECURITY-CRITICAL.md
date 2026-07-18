@@ -1,49 +1,80 @@
 # CRITICAL: DinD privileged host escape (finding C1)
 
-**Status: OPEN — do NOT use HUDDLE_DIND=1 for UNTRUSTED devcontainers until fixed.**
+**Status: MITIGATED (2026-07-18) — host-escape filter enforced on the private
+daemon. Escape red test `gateway/test/dind-compat/e2e-escape.sh` is GREEN.**
 
 ## The issue
 In DinD mode each devcontainer gets an unrestricted private Docker daemon whose
 sidecar (`dind-<name>`) runs `--privileged`. A privileged nested container inside
 a privileged sidecar **sees the host's block devices and kernel**, so an untrusted
-devcontainer can take over the host with zero operator interaction:
+devcontainer could take over the host with zero operator interaction:
 
 ```
 docker run --rm --privileged alpine sh -c 'mount -o ro /dev/sdg /m; cat /m/etc/shadow'
 ```
 
-**Verified on the live env (2026-07-18):** a nested `--privileged` container saw
-`/dev/sda`–`/dev/sdh` (sizes matching the host `/proc/partitions`), mounted host
-disk `/dev/sdg`, read the real host `/etc/hostname` (`ISNL-HBJ7BH4`), the host
-`os-release` (Debian 13), and **read `/etc/shadow`**. From there: the CA private
-key, operator token, DB, every peer devcontainer, the host itself.
+**Verified on the live env (2026-07-18, pre-fix):** a nested `--privileged`
+container saw `/dev/sda`–`/dev/sdh` (sizes matching host `/proc/partitions`),
+mounted host disk `/dev/sdg`, read the real host `/etc/hostname` (`ISNL-HBJ7BH4`),
+host `os-release`, and **read `/etc/shadow`**. From there: the CA private key,
+operator token, DB, every peer devcontainer, the host itself.
 
-The design premise ("only the sidecar is privileged, isolation preserved") is
+The design premise ("only the sidecar is privileged, isolation preserved") was
 **wrong**: `--privileged` is not a boundary against an attacker who controls what
-runs inside the daemon. This *adds* risk vs the classic socket-proxy (which
-hard-denies `Privileged`/`Devices`/host-binds) — the opposite of the goal.
+runs inside the daemon.
 
-## Fix options (evaluated)
-- **Rootless dind** (unprivileged, user-namespaced daemon) — the proper boundary,
-  but **incompatible with the shared-netns model** (rootlesskit needs its own
-  netns; `ip tuntap add tap0` fails under `--network container:<dc>`), and that
-  shared netns is what makes published ports land on the devcontainer's localhost
-  (the Aspire fix). Would require redesigning networking.
-- **userns-remap on the sidecar daemon** — Docker **disables userns for
-  `--privileged` containers**, so it does NOT stop the escape.
-- **Non-privileged sidecar with curated caps + no host `/dev`** — dockerd starts
-  but nested `docker run` fails (runc/cgroup fifo errors); needs more work.
-- **Re-impose host-escape HostConfig denials on the private daemon** (block
-  `Privileged`/`Devices`/`DeviceCgroupRules`/sensitive host-binds/unconfined
-  `SecurityOpt`) via a filter co-located with the sidecar, while keeping
-  everything the socket-proxy wrongly blocked (inspect/networks/ports/volumes-from/
-  archive) OPEN. This closes the escape and preserves the tool-compat wins
-  (Aspire, Testcontainers, compose, …). Cost: `--privileged`-requiring tools
-  (kind/k3d/minikube nodes) would be blocked in DinD mode unless an operator opts
-  a devcontainer into "trusted/privileged" explicitly. **This is the chosen
-  mitigation.**
+## The mitigation (implemented)
+A lean per-container **host-escape filter** (`gateway/src/dind-filter.ts`) sits
+between the devcontainer and its private daemon:
 
-## Interim guidance
-Until the mitigation lands: `HUDDLE_DIND=1` is safe ONLY for TRUSTED workloads.
-The default classic socket-proxy model is unaffected (it hard-denies these
-vectors). Red test: `gateway/test/dind-compat/e2e-escape.sh`.
+- Socket topology: the sidecar `dockerd` listens on `inner.sock`; the gateway
+  serves `docker.sock` (the filter) in the shared dir `/tmp/dc-sockets/<name>`
+  (mounted `/var/run/dind` in both sidecar and devcontainer). The devcontainer's
+  `DOCKER_HOST` points at the **filter**, never `inner.sock` directly.
+- It is a real streaming HTTP/1.1 proxy: it parses **every** request on a keep-
+  alive connection (so a privileged create pipelined after a benign request can't
+  be smuggled past inspection) and forwards each unmodified. On a hijack
+  (interactive exec/attach) it raw-tunnels the rest, preserving **half-open**
+  (docker's exec streams half-close stdin then read output — without half-open the
+  output is silently dropped: the bug the manual Aspire probe surfaced).
+- On `POST /containers/create` it runs `validateDindEscape(HostConfig)` and denies
+  with `403` only the **device/kernel/namespace** vectors: `Privileged`,
+  `Devices`/`DeviceCgroupRules`/`DeviceRequests`, `CapAdd`, host `PidMode`/
+  `IpcMode`/`UsernsMode`/`CgroupnsMode`/`UTSMode`, `CgroupParent`, `Sysctls`,
+  unconfined `SecurityOpt`, per-device Blkio limits.
+- **Binds/Mounts/VolumesFrom stay ALLOWED** — in DinD a bind source resolves
+  against the *disposable sidecar* fs, not the host, so compose/testcontainers
+  workspace mounts work. The one exception: a bind whose source reaches the
+  daemon's own control socket dir (`/var/run/dind`, `/run/dind`, or any ancestor
+  like `/var/run` / `/run` / `/`) is denied — that would let a nested container
+  talk to the UNFILTERED `inner.sock` and bypass the filter.
+
+Net effect: the escape is closed **and** the tool-compat wins the classic socket-
+proxy broke (inspect, networks, port-publish, archive/CopyFile, exec, build,
+non-privileged run, host-path binds) all work. This is strictly better than the
+classic proxy on compat while matching it on host-escape safety.
+
+## Cost / known limitation
+Tools that need a genuinely `--privileged` nested container (kind/k3d/minikube
+worker nodes, some nested-systemd setups) are refused in DinD mode. Testcontainers
+setups that bind the docker socket into a helper (Ryuk) must run with
+`TESTCONTAINERS_RYUK_DISABLED=true` (socket passthrough is a filter bypass and is
+refused). Everything else — Aspire, compose, buildx, most testcontainers — works.
+
+## Rejected alternatives
+- **Rootless dind** — incompatible with the shared-netns model (rootlesskit needs
+  its own netns; `ip tuntap add tap0` fails under `--network container:<dc>`), and
+  that shared netns is what makes published ports land on the devcontainer's
+  localhost (the Aspire fix).
+- **userns-remap on the sidecar** — Docker disables userns for `--privileged`
+  containers, so it does NOT stop the escape.
+- **Non-privileged sidecar** — dockerd starts but nested `docker run` fails
+  (runc/cgroup fifo errors).
+
+## Tests
+- `gateway/test/dind-compat/e2e-escape.sh` — live red test: privileged/device
+  escape refused, host fs unreachable, socket-dir bypass closed, benign bind still
+  forwarded.
+- `gateway/test/dind-filter.test.ts` — unit + socket-level: create inspection,
+  hijack half-open output delivery, pipelining, `validateDindEscape` edge cases.
+- `gateway/test/dind-compat/tools/privileged.sh` — compat-battery variant.

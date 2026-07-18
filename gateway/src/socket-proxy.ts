@@ -157,13 +157,20 @@ function isMeaningfulValue(v: unknown): boolean {
   return true;
 }
 
-// Reject HostConfig shapes that would let a spawned container escape the
-// devcontainer sandbox (read host fs, see host PIDs/devices, talk to host
-// dockerd). Returns a denial reason, or null if the config is acceptable.
-export function validateHostConfig(hostConfig: any): string | null {
-  if (!hostConfig || typeof hostConfig !== 'object') return null;
-
-  // ── Hard-denies (altijd afgedwongen) ──────────────────────────────────────
+// Host-escape hard-denies: the HostConfig shapes that let a container reach the
+// host (privileged/device access, host-path/device binds, host namespaces,
+// dangerous SecurityOpt). Shared by the classic socket-proxy AND the DinD filter
+// (dind-filter.ts) — in DinD the sidecar is --privileged, so a --privileged /
+// --device / -v /dev/… nested container reaches the HOST's block devices and
+// kernel (finding C1). These MUST be denied on the private daemon too. Returns a
+// denial reason or null.
+// Device/kernel/namespace hard-denies: the vectors that give a container direct
+// host-kernel/device access regardless of filesystem. Apply to BOTH the classic
+// proxy AND the DinD filter (in DinD the sidecar is --privileged, so a
+// --privileged / --device / host-namespace nested container reaches the HOST's
+// block devices and kernel — finding C1). Binds/Mounts/VolumesFrom are handled
+// separately because their safety differs between the two modes.
+function validateKernelEscape(hostConfig: any): string | null {
   if (hostConfig.Privileged === true) return 'Privileged containers not permitted';
   if (hostConfig.PidMode && hostConfig.PidMode !== '') return 'PidMode not permitted';
   if (hostConfig.IpcMode === 'host') return 'IpcMode=host not permitted';
@@ -171,47 +178,32 @@ export function validateHostConfig(hostConfig: any): string | null {
   if (hostConfig.CgroupnsMode === 'host') return 'CgroupnsMode=host not permitted';
   if (hostConfig.UTSMode === 'host') return 'UTSMode=host not permitted';
   if (hostConfig.CgroupParent) return 'CgroupParent override not permitted';
-
-  if (Array.isArray(hostConfig.CapAdd) && hostConfig.CapAdd.length > 0)
-    return 'CapAdd not permitted';
-  if (Array.isArray(hostConfig.Devices) && hostConfig.Devices.length > 0)
-    return 'Devices not permitted';
-
-  // Finding #1: VolumesFrom laat de nieuwe container de mounts (incl. huddle's
-  // echte docker.sock + CA-key + DB) van een andere container erven → host-takeover.
-  if (Array.isArray(hostConfig.VolumesFrom) && hostConfig.VolumesFrom.length > 0)
-    return 'VolumesFrom not permitted';
-
-  // Finding #2 + device-familie: cgroup/whitelist- en device-request-velden
-  // geven toegang tot host block-/char-devices (raw-disk via default CAP_MKNOD).
-  if (Array.isArray(hostConfig.DeviceCgroupRules) && hostConfig.DeviceCgroupRules.length > 0)
-    return 'DeviceCgroupRules not permitted';
-  if (Array.isArray(hostConfig.DeviceRequests) && hostConfig.DeviceRequests.length > 0)
-    return 'DeviceRequests not permitted';
+  if (Array.isArray(hostConfig.CapAdd) && hostConfig.CapAdd.length > 0) return 'CapAdd not permitted';
+  if (Array.isArray(hostConfig.Devices) && hostConfig.Devices.length > 0) return 'Devices not permitted';
+  if (Array.isArray(hostConfig.DeviceCgroupRules) && hostConfig.DeviceCgroupRules.length > 0) return 'DeviceCgroupRules not permitted';
+  if (Array.isArray(hostConfig.DeviceRequests) && hostConfig.DeviceRequests.length > 0) return 'DeviceRequests not permitted';
   for (const k of ['BlkioDeviceReadBps', 'BlkioDeviceWriteBps', 'BlkioDeviceReadIOps', 'BlkioDeviceWriteIOps'] as const) {
     if (Array.isArray(hostConfig[k]) && hostConfig[k].length > 0) return `${k} not permitted`;
   }
-
   const sys = hostConfig.Sysctls;
-  if (sys && typeof sys === 'object' && Object.keys(sys).length > 0)
-    return 'Sysctls not permitted';
-
+  if (sys && typeof sys === 'object' && Object.keys(sys).length > 0) return 'Sysctls not permitted';
   if (Array.isArray(hostConfig.SecurityOpt)) {
     for (const opt of hostConfig.SecurityOpt) {
       if (typeof opt !== 'string') continue;
       const norm = opt.toLowerCase().replace(/\s+/g, '');
-      if (norm === 'apparmor=unconfined' ||
-          norm === 'seccomp=unconfined' ||
-          norm === 'label=disable' ||
-          norm === 'systempaths=unconfined' ||
-          norm === 'no-new-privileges=false')
+      if (norm === 'apparmor=unconfined' || norm === 'seccomp=unconfined' || norm === 'label=disable' ||
+          norm === 'systempaths=unconfined' || norm === 'no-new-privileges=false')
         return `SecurityOpt ${opt} not permitted`;
     }
   }
+  return null;
+}
 
-  // Bind mounts from the host fs are the main escape vector
-  // (`-v /:/host`, `-v /var/run/docker.sock:/var/run/docker.sock`).
-  // Source paths starting with `/` are host paths; anything else is a named volume.
+export function validateHostConfigEscape(hostConfig: any): string | null {
+  if (!hostConfig || typeof hostConfig !== 'object') return null;
+  const kernel = validateKernelEscape(hostConfig);
+  if (kernel) return kernel;
+  if (Array.isArray(hostConfig.VolumesFrom) && hostConfig.VolumesFrom.length > 0) return 'VolumesFrom not permitted';
   if (Array.isArray(hostConfig.Binds)) {
     for (const bind of hostConfig.Binds) {
       if (typeof bind !== 'string') continue;
@@ -219,18 +211,83 @@ export function validateHostConfig(hostConfig: any): string | null {
       if (src.startsWith('/')) return `host-path bind not permitted: ${bind}`;
     }
   }
-
   if (Array.isArray(hostConfig.Mounts)) {
     for (const mount of hostConfig.Mounts) {
       if (!mount) continue;
       if (mount.Type === 'bind') return 'bind-type mounts not permitted';
-      // Een `local`-volume met inline driver-config kan een willekeurig hostpad
-      // bind-backen (type=none, o=bind, device=/…) — net zo gevaarlijk als een
-      // host bind. Weiger elke volume-mount die zelf een driver meebrengt.
-      if (mount.Type === 'volume' && mount.VolumeOptions?.DriverConfig)
-        return 'volume DriverConfig not permitted';
+      if (mount.Type === 'volume' && mount.VolumeOptions?.DriverConfig) return 'volume DriverConfig not permitted';
     }
   }
+  return null;
+}
+
+// Normalize a POSIX path: collapse `.`/`..`/duplicate slashes, drop trailing
+// slash (except root). Used to defeat `..`-based evasions of the socket-dir guard.
+function normPosix(p: string): string {
+  const abs = p.startsWith('/');
+  const parts: string[] = [];
+  for (const seg of p.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { if (parts.length) parts.pop(); continue; }
+    parts.push(seg);
+  }
+  return (abs ? '/' : '') + parts.join('/') || (abs ? '/' : '.');
+}
+
+// The private daemon's control sockets live here (bind-mounted into the sidecar).
+// A nested container that bind-mounts this dir — or any ANCESTOR of it (/, /var,
+// /var/run, …) — reaches inner.sock and talks to the UNFILTERED dockerd, escaping
+// the host-escape guard. `/var/run` is a symlink to `/run` on the Alpine dind
+// image, so guard both roots. This is the ONE bind DinD must refuse.
+const DIND_SOCKET_DIRS = ['/var/run/dind', '/run/dind'];
+function bindReachesDindSocket(src: string): boolean {
+  if (!src.startsWith('/')) return false; // named volume / relative → not a host path
+  const p = normPosix(src);
+  if (p === '/') return true;
+  for (const sock of DIND_SOCKET_DIRS) {
+    if (p === sock) return true;                 // the socket dir itself
+    if (p.startsWith(sock + '/')) return true;   // nested under it
+    if (sock.startsWith(p + '/')) return true;   // p is an ancestor of it
+  }
+  return false;
+}
+
+// DinD variant: the sidecar is a DISPOSABLE private daemon, so a bind source
+// resolves against the SIDECAR filesystem, not the host — ordinary host-path
+// binds (workspace files for compose/testcontainers) are safe and MUST work. The
+// only bind that matters is one reaching the daemon's control socket (which would
+// bypass this very filter); plus the shared kernel/device denies. Returns a
+// denial reason or null.
+export function validateDindEscape(hostConfig: any): string | null {
+  if (!hostConfig || typeof hostConfig !== 'object') return null;
+  const kernel = validateKernelEscape(hostConfig);
+  if (kernel) return kernel;
+  if (Array.isArray(hostConfig.Binds)) {
+    for (const bind of hostConfig.Binds) {
+      if (typeof bind !== 'string') continue;
+      const src = bind.split(':')[0] ?? '';
+      if (bindReachesDindSocket(src)) return `bind of the private daemon socket path not permitted: ${bind}`;
+    }
+  }
+  if (Array.isArray(hostConfig.Mounts)) {
+    for (const mount of hostConfig.Mounts) {
+      if (!mount || mount.Type !== 'bind') continue;
+      if (typeof mount.Source === 'string' && bindReachesDindSocket(mount.Source))
+        return `bind of the private daemon socket path not permitted: ${mount.Source}`;
+    }
+  }
+  return null;
+}
+
+// Reject HostConfig shapes that would let a spawned container escape the
+// devcontainer sandbox (read host fs, see host PIDs/devices, talk to host
+// dockerd). Returns a denial reason, or null if the config is acceptable.
+export function validateHostConfig(hostConfig: any): string | null {
+  if (!hostConfig || typeof hostConfig !== 'object') return null;
+
+  // Host-escape hard-denies (Privileged/devices/host-binds/host-namespaces/etc.).
+  const escape = validateHostConfigEscape(hostConfig);
+  if (escape) return escape;
 
   // ── Generieke allowlist-sweep (log-only default, enforce via env) ──────────
   // Elke sleutel die we niet herkennen én die een betekenisvolle waarde draagt

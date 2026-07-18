@@ -134,7 +134,7 @@ if [ -n "$cid" ]; then
     sleep 4
   done
 fi
-[ -n "$healthy" ] && pass "SqlServer answers a real query (fully functional through the private daemon)" || { fail "SqlServer never answered a query"; rc=1; }
+[ -n "$healthy" ] && pass "SqlServer answers a real query (fully functional through the private daemon)" || { fail "SqlServer never answered a query (last sqlcmd: ${out:-<none>})"; rc=1; }
 
 runlog=$(docker exec -u vscode "$DC" cat /home/vscode/apphost/run.log 2>/dev/null)
 echo "$runlog" | grep -qi "not owned by this devcontainer" && { fail "issue #61 ownership error present"; rc=1; } || pass "no 'not owned by this devcontainer' error (#61)"
