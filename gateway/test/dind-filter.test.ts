@@ -41,6 +41,16 @@ describe('validateDindEscape', () => {
   it('denies a socket-dir bind expressed as a Mount', () => {
     expect(validateDindEscape({ Mounts: [{ Type: 'bind', Source: '/var/run/dind', Target: '/x' }] })).toMatch(/socket path/);
   });
+  it('denies binding inner.sock (the unfiltered daemon) directly', () => {
+    expect(validateDindEscape({ Binds: ['/var/run/dind/inner.sock:/var/run/docker.sock'] })).toMatch(/socket path/);
+    expect(validateDindEscape({ Binds: ['/run/dind/inner.sock:/x'] })).toMatch(/socket path/);
+  });
+  it.each([
+    '/var/run/dind/docker.sock',
+    '/run/dind/docker.sock',
+  ])('ALLOWS binding the filter socket %s (Testcontainers Ryuk / docker-outside-of-docker)', (src) => {
+    expect(validateDindEscape({ Binds: [`${src}:/var/run/docker.sock`] })).toBeNull();
+  });
   it('allows a benign bind expressed as a Mount', () => {
     expect(validateDindEscape({ Mounts: [{ Type: 'bind', Source: '/home/vscode/x', Target: '/x' }] })).toBeNull();
   });

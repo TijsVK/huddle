@@ -73,6 +73,18 @@ for src in /var/run/dind /run/dind /var/run /run /; do
 done
 [ "$bypass" = 0 ] && pass "no socket-dir bind reaches the unfiltered daemon (filter bypass closed)"
 
+# 5b. Binding the FILTER socket (docker.sock) IS allowed (Testcontainers Ryuk /
+#     docker-outside-of-docker) — but it stays FILTERED: a --privileged create
+#     issued THROUGH it must still be refused.
+docker exec -u vscode "$DC" docker pull -q docker:28-cli >/dev/null 2>&1
+dood=$(docker exec -u vscode "$DC" docker run --rm -v /var/run/dind/docker.sock:/var/run/docker.sock docker:28-cli \
+  sh -c 'docker run --rm --privileged alpine:3.20 true 2>&1' | tr -d '\r')
+if printf '%s' "$dood" | grep -q "not permitted"; then
+  pass "filter-socket passthrough stays filtered (privileged-through-Ryuk refused)"
+else
+  fail "privileged create through the bound filter socket was NOT refused ($dood)"; rc=1
+fi
+
 # 6. A benign (non-socket) host-path bind MUST still be forwarded — the DinD
 #    compat win (compose/testcontainers workspace mounts). It resolves against the
 #    sidecar fs; reading the sidecar's own /etc/alpine-release proves it works.

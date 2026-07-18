@@ -22,7 +22,7 @@
 import net from 'net';
 import fs from 'fs';
 import path from 'path';
-import { validateDindEscape } from './socket-proxy';
+import { validateDindEscape } from './host-config-policy';
 
 const filterServers = new Map<string, net.Server>();
 

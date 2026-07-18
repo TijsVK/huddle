@@ -23,38 +23,49 @@ build_testdc() {
   docker build -t "$TESTDC_IMAGE" -f "$HERE/Dockerfile.testdc" "$HERE" >&2
 }
 
-# up <name> [network]  — start devcontainer + netns-sharing dind sidecar.
+# up <name> [network]  — start devcontainer + netns-sharing dind sidecar, WITH the
+# real host-escape filter in front (mirrors the gateway: devcontainer -> filter
+# docker.sock -> sidecar inner.sock). This makes the harness faithful — a
+# --privileged/--device/socket-bind nested container is refused exactly as it is
+# in the shipped product, not passed straight to raw dockerd.
 up() {
   local name="$1"; local net="${2:-bridge}"
   local dc="${PREFIX}-${name}" dind="${PREFIX}-${name}-dind"
-  local sock="${PREFIX}-${name}-sock" data="${PREFIX}-${name}-data" work="${PREFIX}-${name}-work"
+  local data="${PREFIX}-${name}-data" work="${PREFIX}-${name}-work"
+  local sockdir="/tmp/dindc-sock/${name}"
   docker rm -f "$dc" "$dind" >/dev/null 2>&1 || true
-  docker volume rm "$sock" "$data" "$work" >/dev/null 2>&1 || true
-  docker volume create "$sock" >/dev/null
+  docker volume rm "$data" "$work" >/dev/null 2>&1 || true
+  # Kill a stale filter for this name, then reset the shared host sock dir.
+  [ -f "$sockdir/filter.pid" ] && kill "$(cat "$sockdir/filter.pid")" 2>/dev/null || true
+  rm -rf "$sockdir"; mkdir -p "$sockdir"; chmod 0777 "$sockdir"
   docker volume create "$data" >/dev/null
   docker volume create "$work" >/dev/null
   # /work is a workspace volume shared by BOTH devcontainer and sidecar at the
   # same path — exactly what the gateway now does with the real workspace so that
   # bind-mounting workspace paths into nested containers sees real files.
+  # The devcontainer's DOCKER_HOST points at the FILTER socket (docker.sock).
   docker run -d --name "$dc" --network "$net" \
-    -v "$sock":/var/run/dind -v "$work":/work \
+    -v "$sockdir":/var/run/dind -v "$work":/work \
     -e DOCKER_HOST=unix:///var/run/dind/docker.sock \
     --cap-add NET_ADMIN \
     "$TESTDC_IMAGE" sleep infinity >/dev/null || { fail "$name: devcontainer failed to start"; return 1; }
-  # chmod the socket 0666 once dockerd creates it so a non-root devcontainer user
-  # (e.g. Aspire running as 'dev') can reach it — mirrors dind.ts.
+  # Sidecar dockerd listens on inner.sock (the filter fronts it as docker.sock).
   docker run -d --name "$dind" --privileged \
     --network "container:${dc}" \
-    -v "$sock":/var/run/dind -v "$data":/var/lib/docker -v "$work":/work \
+    -v "$sockdir":/var/run/dind -v "$data":/var/lib/docker -v "$work":/work \
     -e DOCKER_TLS_CERTDIR= \
-    "$DIND_IMAGE" sh -c 'if [ -f /sys/fs/cgroup/cgroup.controllers ]; then mkdir -p /sys/fs/cgroup/init 2>/dev/null||true; xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null||true; sed -e "s/ / +/g" -e "s/^/+/" < /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null||true; fi; dockerd --host=unix:///var/run/dind/docker.sock --mtu=1400 & DPID=$!; i=0; while [ ! -S /var/run/dind/docker.sock ] && [ $i -lt 120 ]; do sleep 0.5; i=$((i+1)); done; chmod 0666 /var/run/dind/docker.sock 2>/dev/null || true; wait $DPID' >/dev/null \
+    "$DIND_IMAGE" sh -c 'if [ -f /sys/fs/cgroup/cgroup.controllers ]; then mkdir -p /sys/fs/cgroup/init 2>/dev/null||true; xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null||true; sed -e "s/ / +/g" -e "s/^/+/" < /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null||true; fi; dockerd --host=unix:///var/run/dind/inner.sock --mtu=1400 & DPID=$!; i=0; while [ ! -S /var/run/dind/inner.sock ] && [ $i -lt 120 ]; do sleep 0.5; i=$((i+1)); done; chmod 0666 /var/run/dind/inner.sock 2>/dev/null || true; wait $DPID' >/dev/null \
     || { fail "$name: dind sidecar failed to start"; return 1; }
+  # Start the real filter on the host (docker.sock -> inner.sock).
+  node "$HERE/filter-runner.mjs" "$name" "$sockdir/docker.sock" "$sockdir/inner.sock" \
+    >"$sockdir/filter.log" 2>&1 &
+  echo $! > "$sockdir/filter.pid"
   local i
   for i in $(seq 1 90); do
     docker exec "$dc" docker version >/dev/null 2>&1 && return 0
     sleep 1
   done
-  fail "$name: dind daemon did not become ready"; return 1
+  fail "$name: dind daemon did not become ready"; cat "$sockdir/filter.log" >&2 2>/dev/null; return 1
 }
 
 # dcsh <name> "<script>" — run a shell script inside the devcontainer.
@@ -64,9 +75,11 @@ dcsh() { docker exec -i "${PREFIX}-$1" bash -lc "$2"; }
 dcshu() { docker exec -i -u "$2" "${PREFIX}-$1" bash -lc "$3"; }
 
 down() {
-  local name="$1"
+  local name="$1"; local sockdir="/tmp/dindc-sock/${name}"
+  [ -f "$sockdir/filter.pid" ] && kill "$(cat "$sockdir/filter.pid")" 2>/dev/null || true
   docker rm -f "${PREFIX}-${name}" "${PREFIX}-${name}-dind" >/dev/null 2>&1 || true
-  docker volume rm "${PREFIX}-${name}-sock" "${PREFIX}-${name}-data" "${PREFIX}-${name}-work" >/dev/null 2>&1 || true
+  docker volume rm "${PREFIX}-${name}-data" "${PREFIX}-${name}-work" >/dev/null 2>&1 || true
+  rm -rf "$sockdir"
 }
 
 # assert_contains <haystack> <needle> <label>

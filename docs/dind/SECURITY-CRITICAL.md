@@ -56,10 +56,13 @@ classic proxy on compat while matching it on host-escape safety.
 
 ## Cost / known limitation
 Tools that need a genuinely `--privileged` nested container (kind/k3d/minikube
-worker nodes, some nested-systemd setups) are refused in DinD mode. Testcontainers
-setups that bind the docker socket into a helper (Ryuk) must run with
-`TESTCONTAINERS_RYUK_DISABLED=true` (socket passthrough is a filter bypass and is
-refused). Everything else — Aspire, compose, buildx, most testcontainers — works.
+worker nodes, dind-in-dind, some nested-systemd setups) are refused in DinD mode.
+Everything else works, including **Testcontainers with its Ryuk reaper**: binding
+the FILTER socket (`/var/run/dind/docker.sock`) into a nested container is allowed
+because that container then talks THROUGH the filter and still cannot create a
+privileged/escaping container (verified live in `e2e-escape.sh`). Only the
+UNFILTERED `inner.sock` / the socket dir / its ancestors are refused. Aspire,
+compose, buildx (default builder), Testcontainers all work.
 
 ## Rejected alternatives
 - **Rootless dind** — incompatible with the shared-netns model (rootlesskit needs
