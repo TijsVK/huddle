@@ -60,6 +60,8 @@ and fixed along the way (listed below).
 5. cgroup-v2 controllers not delegated (bypassed `dockerd-entrypoint.sh`) → nested `--memory`/`--cpus` not enforced.
 6. pip ignored the system CA (own certifi bundle) → `pip install` failed through the MITM (fixed with `PIP_CERT`).
 7. `host.docker.internal` was not in `no_proxy` → Aspire container-telemetry gRPC (h2c) routed through the HTTP/1 proxy → **gRPC errors on the dashboard**. Now bypassed everywhere Huddle sets proxy env (+ Java nonProxyHosts).
+8. **(self-review, HIGH)** proxy path sanitizer used a non-`u` regex → a decoded emoji in a URL threw `URIError` → unhandled rejection → gateway exit. Fixed (`/gu` + try/catch + `unhandledRejection` handler); unit-tested.
+9. Delete/migrate removed the devcontainer before its netns-sharing sidecar (could refuse + leak); image-pull errors swallowed; migrate could destroy a non-devcontainer; root-grant extend-at-expiry race. All fixed.
 
 ## Full end-to-end (real gateway, not the harness stand-in)
 
