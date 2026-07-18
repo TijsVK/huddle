@@ -71,14 +71,16 @@ there is no second, unfiltered path to reach.
   percent-encoding) before matching so a crafted create path can't dodge
   inspection (finding #6).
 
-### Residual (known limitation)
-The host-kernel-bind deny is by **lexical source path**. A devcontainer that has a
-writable *shared* mount (its workspace) could plant a symlink there pointing at
-`/proc/sys` and bind the symlink, which dockerd resolves on the sidecar fs — the
-plugin sees only the (allowed) symlink path. Closing this fully needs either
-dropping host-path binds entirely (breaks compose workspace mounts) or mounting the
-shared workspace `nosymfollow` into the sidecar — tracked as future hardening. The
-DIRECT bind attack (the practical exploit) is closed.
+### The symlink variant (also closed)
+The host-kernel-bind deny above is by lexical source path, so a devcontainer with a
+writable *shared* mount (its workspace) could otherwise plant a symlink there
+(`workspace/evil -> /proc/sys`) and bind the symlink, which dockerd resolves on the
+sidecar fs to the host's `/proc/sys` (verified live: wrote host `core_pattern`). This
+is closed by remounting every shared workspace/folder mount **`nosymfollow`** in the
+sidecar (the sidecar command does this before dockerd starts): the kernel then
+refuses to follow a symlink out of the workspace during bind-source resolution, so
+the bind fails. Legit (non-symlink) workspace binds — including compose `./path`
+mounts — are unaffected (verified). Requires Linux ≥ 5.10 (nosymfollow).
 
 The plugin dir is mounted **read-only** into the sidecar: dockerd only connects to
 the socket, never writes there. Without this, a nested container (binds are

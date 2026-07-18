@@ -45,7 +45,18 @@ assert_contains "$out" "3." "$NAME: benign host-path bind still works (compose/t
 out=$(dcsh "$NAME" 'docker run --rm alpine:3.20 echo RUN_OK 2>&1' | tr -d "\r")
 assert_contains "$out" "RUN_OK" "$NAME: non-privileged nested container runs" || rc=1
 
-# 7. Isolation: the private daemon only sees its own containers.
+# 7. Host-kernel bind is refused, direct AND via a workspace symlink (finding #3).
+out=$(dcsh "$NAME" 'docker run --rm -v /proc/sys:/ps alpine:3.20 true 2>&1' | tr -d "\r")
+assert_contains "$out" "host kernel path" "$NAME: direct /proc/sys bind refused" || rc=1
+# Plant a symlink in the shared /work pointing at /proc/sys, then try to bind it.
+# nosymfollow on the sidecar's /work must make dockerd refuse to resolve it.
+dcsh "$NAME" 'docker run --rm -v /work:/w alpine:3.20 ln -sf /proc/sys /w/ev 2>/dev/null' >/dev/null 2>&1
+if dcsh "$NAME" 'docker run --rm -v /work/ev:/x alpine:3.20 test -e /x/kernel/core_pattern' >/dev/null 2>&1; then
+  fail "$NAME: workspace-symlink bind reached host /proc/sys (escape)"; rc=1
+else pass "$NAME: workspace-symlink bind to /proc/sys refused (nosymfollow)"; fi
+dcsh "$NAME" 'rm -f /work/ev 2>/dev/null; docker run --rm -v /work:/w alpine:3.20 rm -f /w/ev 2>/dev/null' >/dev/null 2>&1
+
+# 8. Isolation: the private daemon only sees its own containers.
 cnt=$(dcsh "$NAME" 'docker ps -aq | wc -l' 2>/dev/null | tr -d "[:space:]")
 pass "$NAME: private daemon isolated (sees only own $cnt container(s))"
 

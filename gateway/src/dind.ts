@@ -189,12 +189,26 @@ export async function createDindSidecar(
     `xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true; ` +
     `sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true; ` +
     `fi; `;
+  // Close the host-kernel-bind symlink residual (finding #3): the shared workspace/
+  // folder mounts are writable by nested containers, so one could plant a symlink
+  // (workspace/evil -> /proc/sys) and `-v workspace/evil:/x` — dockerd resolves the
+  // symlink on the sidecar fs, reaching the HOST's rw /proc/sys (→ core_pattern →
+  // host root; the lexical bind guard only sees the allowed workspace path). Remount
+  // each shared mount `nosymfollow` so the kernel refuses to follow symlinks out of
+  // it during bind-source resolution. Legit (non-symlink) binds are unaffected.
+  const nosymList = sharedMounts
+    .map(m => `'${m.Target.replace(/'/g, "'\\''")}'`)
+    .join(' ');
+  const nosymfollowPrep = nosymList
+    ? `for t in ${nosymList}; do mount -o remount,bind,nosymfollow "$t" "$t" 2>/dev/null || true; done; `
+    : '';
   const cmd = [
     'sh', '-c',
     `mkdir -p /usr/local/share/ca-certificates; ` +
     `echo "$HUDDLE_CA_B64" | base64 -d > /usr/local/share/ca-certificates/huddle-ca.crt; ` +
     `update-ca-certificates 2>/dev/null || cat /usr/local/share/ca-certificates/huddle-ca.crt >> /etc/ssl/certs/ca-certificates.crt; ` +
     cgroupPrep +
+    nosymfollowPrep +
     // dockerd listens on its own docker.sock and enforces our authorization
     // plugin (huddle-authz) on every request — the C1 host-escape guard. dockerd
     // discovers the plugin by name at /run/docker/plugins/huddle-authz.sock,
