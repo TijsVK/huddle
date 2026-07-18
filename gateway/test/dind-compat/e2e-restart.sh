@@ -28,8 +28,10 @@ for i in $(seq 1 60); do docker exec -u vscode "$DC" docker version >/dev/null 2
 
 egress(){ docker exec -u vscode "$DC" curl -s -o /dev/null -w '%{http_code}' -m 20 https://example.com 2>/dev/null; }
 
-# Baseline before restart.
-[ "$(egress)" = 200 ] && pass "egress works before restart" || { fail "egress before restart"; rc=1; }
+# Baseline before restart. Retry: the first request can 502/time out while the
+# MITM proxy warms its leaf-cert cache (cold-start, same as the post-restart check).
+b=""; for i in $(seq 1 15); do b=$(egress); [ "$b" = 200 ] && break; sleep 3; done
+[ "$b" = 200 ] && pass "egress works before restart" || { fail "egress before restart ($b)"; rc=1; }
 # Apply a root grant (permanent) and confirm sudo works.
 curl -s -H "$AUTH" -H 'content-type: application/json' -X PUT "$API/api/authz/root-grants/$DC" -d '{"permanent":true}' >/dev/null 2>&1
 sleep 2
