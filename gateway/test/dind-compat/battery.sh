@@ -46,8 +46,15 @@ runone() { # <label> <cmd...>
   cat "$OUT/$label.out"; [ "${STATUS[$label]}" -ne 0 ] && tail -3 "$OUT/$label.err" 2>/dev/null | sed 's/^/  stderr: /'
 }
 
-for t in "${run_harness[@]}"; do [ -f "$HERE/tools/$t.sh" ] && runone "$t" bash "$HERE/tools/$t.sh" bridge || log "skip $t (missing)"; done
-for e in "${run_e2e[@]}"; do [ -f "$HERE/$e.sh" ] && runone "$e" bash "$HERE/$e.sh" || log "skip $e (missing)"; done
+# if/then/else, not `&& runone || log`: runone returns non-zero when a test PASSES
+# (its last statement is a `[ status -ne 0 ]` guard), which the `||` misread as
+# "missing" and logged a spurious skip.
+for t in "${run_harness[@]}"; do
+  if [ -f "$HERE/tools/$t.sh" ]; then runone "$t" bash "$HERE/tools/$t.sh" bridge; else log "skip $t (missing)"; fi
+done
+for e in "${run_e2e[@]}"; do
+  if [ -f "$HERE/$e.sh" ]; then runone "$e" bash "$HERE/$e.sh"; else log "skip $e (missing)"; fi
+done
 
 ALLRUN=("${run_harness[@]}" "${run_e2e[@]}")
 RESULTS="$REPO/docs/dind/RESULTS.generated.md"
