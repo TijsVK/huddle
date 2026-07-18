@@ -120,7 +120,21 @@ plugins` could replace the authz socket with an allow-all one — plugin dir now
 mounted READ-ONLY into the sidecar); #3 host-kernel bind (privileged sidecar's
 /proc,/sys are the HOST's — `-v /proc/sys` wrote the host core_pattern → root; now
 deny binds of /proc,/sys,/dev,/); #4 partial MaskedPaths unmask (require a superset
-of runc defaults). The #3 workspace-symlink variant is now also CLOSED:
+of runc defaults). **Aspire dashboard gRPC / Blazor-circuit errors FIXED (user-reported).** Not a
+proxy issue: Aspire runs its dashboard+resource-service+OTLP over HTTPS with the
+self-signed ASP.NET dev cert (loopback-bound, so the MITM proxy — which only
+touches :443 and raw-tunnels the rest — is never involved). The dev cert isn't
+trusted in the devcontainer → the dashboard's resource-service gRPC fails with
+`UntrustedRoot` → the Blazor UI circuit throws. Fix: inject
+`ASPIRE_ALLOW_UNSECURED_TRANSPORT=true` into the devcontainer env → plain-http local
+endpoints, no dev-cert to distrust. Verified live (Dashboard/OTLP on http://, zero
+UntrustedRoot). e2e-aspire-sqlserver asserts it.
+
+**Security: FIVE adversarial review rounds, the last CLEAN.** No new host-root
+escape in round 5 (re-audited build/archive/images/networks/update; safeRoots are
+operator-only + sensitive-root deny runs first). See SECURITY-CRITICAL.md.
+
+The #3 workspace-symlink variant is now also CLOSED:
 shared workspace/folder mounts are remounted `nosymfollow` in the sidecar so
 dockerd can't follow a symlink out of the workspace during bind-source resolution
 (verified live; compose `./path` binds unaffected). Full harness battery GREEN
