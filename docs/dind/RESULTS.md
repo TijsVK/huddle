@@ -62,6 +62,7 @@ and fixed along the way (listed below).
 7. `host.docker.internal` was not in `no_proxy` → Aspire container-telemetry gRPC (h2c) routed through the HTTP/1 proxy → **gRPC errors on the dashboard**. Now bypassed everywhere Huddle sets proxy env (+ Java nonProxyHosts).
 8. **(self-review, HIGH)** proxy path sanitizer used a non-`u` regex → a decoded emoji in a URL threw `URIError` → unhandled rejection → gateway exit. Fixed (`/gu` + try/catch + `unhandledRejection` handler); unit-tested.
 9. Delete/migrate removed the devcontainer before its netns-sharing sidecar (could refuse + leak); image-pull errors swallowed; migrate could destroy a non-devcontainer; root-grant extend-at-expiry race. All fixed.
+10. Huddle 502'd every transient upstream `ETIMEDOUT`/`ECONNRESET` (flaky network) with no retry → `go mod` (many rapid GETs) failed. Now idempotent (GET/HEAD/OPTIONS, no body) upstream requests **retry** on connection-level errors; streaming/POST unchanged. + upstream errors are now logged.
 
 ## Full end-to-end (real gateway, not the harness stand-in)
 
