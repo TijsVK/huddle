@@ -13,25 +13,34 @@ Host used for these runs: Docker 29.x, `docker:28-dind` sidecar, `docker:28-cli`
 based test devcontainer. Tier-1 = tools on a normal network; Tier-2 (`egress`) =
 the real Huddle constraint (internal network, all egress via a forward proxy).
 
-**All workflows below pass**, each with functional assertions. This table is
-hand-maintained; `battery.sh` regenerates a fresh combined report on a full run.
-~24 distinct dev workflows + the real-gateway Aspire+SqlServer E2E; 6 bugs found
-and fixed along the way (listed below).
+> **These runs now go through the shipped C1 host-escape filter** (`dind-filter`),
+> not raw dockerd — `lib.sh` fronts the sidecar's `inner.sock` with the real filter
+> via `filter-runner.mjs`, exactly as the gateway does. So the results below reflect
+> the product's actual security posture: device/kernel/namespace escape vectors and
+> `--privileged` are refused; ordinary binds/volumes and every non-escape API pass
+> through. See `docs/dind/SECURITY-CRITICAL.md` (finding C1, MITIGATED).
+
+**All workflows below pass** (compat rows) or **assert a documented limitation**
+(⛔ rows — tools that require `--privileged`, refused by the filter). Each row uses
+functional assertions. This table is hand-maintained; `battery.sh` regenerates a
+fresh combined report. ~24 dev workflows + real-gateway Aspire+SqlServer E2E; the
+C1 filter work found+fixed 3 more bugs (exec half-open, bind over-block, BuildKit
+/grpc) on top of the earlier 10.
 
 | Tool | Result | What was proven (functional, not just "started") |
 |------|--------|--------------------------------------------------|
 | docker compose | ✅ pass | healthcheck-gated `up --wait`, service-name DNS, published port on `localhost` **and** `[::1]` |
-| Testcontainers (node) | ✅ pass | container start, `getMappedPort` (inspect), `exec` → PONG, reachable mapped port, stop |
-| BuildKit / buildx | ✅ pass | multi-stage `DOCKER_BUILDKIT=1` build, run result, `buildx build --load` |
-| privileged / binds / volumes-from | ✅ pass | `--privileged` (mount tmpfs), host-path bind, `--volumes-from` — all socket-proxy-forbidden, all work; daemon isolated |
-| k3d (Kubernetes) | ✅ pass | real cluster create, node Ready, deployment rollout, nginx pod Running |
+| Testcontainers (node) | ✅ pass | container start, `getMappedPort` (inspect), `exec` → PONG, reachable mapped port, stop; **Ryuk works** — binding the *filter* socket is allowed and stays filtered |
+| BuildKit / buildx | ✅ pass | legacy build, **default builder via `/grpc` h2c upgrade** (`docker build`), `buildx build --load` |
+| host-escape filter (C1) | ✅ pass | `--privileged` / `--device` / `--pid=host` / socket-dir bind **refused**; ordinary host-path bind + non-privileged run **allowed**; privileged-through-bound-filter-socket still refused |
+| k3d (Kubernetes) | ⛔ limitation | needs `--privileged` nodes → **refused by the filter** (asserted); use classic mode or a real cluster |
 | LocalStack | ✅ pass | container healthy on `localhost:4566`, real `aws s3 mb` succeeds |
 | act (GitHub Actions) | ✅ pass | runner image pull, workflow step executed, job succeeded |
 | Dev Containers CLI | ✅ pass | `devcontainer up` (build+start), **workspace files visible inside nested devcontainer**, `exec` |
 | workspace bind-through | ✅ pass | shared workspace readable+writable in nested containers (both directions); non-shared path limitation asserted |
 | egress (Tier-2) | ✅ pass | no direct internet without proxy; proxied HTTPS; image pull via proxy; nested egress via injected proxy; **loopback NOT proxied on `localhost` and `[::1]` (Aspire #12 fix)** |
 | .NET Aspire | ✅ pass | DCP-spawned container reaches **Running**; **no #12 403**, **no CopyFile block**, **no #61 "not owned by this devcontainer"** |
-| isolation (adversarial) | ✅ pass | private daemon shows no host/peer containers; can't see a peer devcontainer; privileged nested container confined to the private daemon |
+| isolation (adversarial) | ✅ pass | private daemon shows no host/peer containers; can't see a peer devcontainer; host fs unreachable; no socket-dir bypass to the unfiltered daemon |
 | nested runtime egress | ⚠️ boundary | nested-container HTTPS **routes through the proxy**; CA trust not auto-injected into nested containers (mount the CA / set `SSL_CERT_FILE`) — expected, matches Docker Desktop behind a corporate MITM |
 | Kafka (Testcontainers) | ✅ pass | create topic + produce + consume via the **advertised listener** (mapped port on the devcontainer's localhost, shared netns) |
 | toolchain CA matrix | ✅ pass | git / `go mod` / rustup / `cargo fetch` all work through the MITM (system trust store). Surfaced+fixed: **sudo dropped the proxy/CA env** → `sudo apt-get` had no network; fixed with a sudoers `env_keep` drop-in |
@@ -43,8 +52,9 @@ and fixed along the way (listed below).
 | local registry | ✅ pass | build → push → pull → run round-trip to a nested `registry:2` |
 | resource limits | ✅ pass | `--memory` / `--cpus` / `--pids-limit` enforced on nested containers (cgroup-v2 delegation) |
 | restart resilience | ✅ pass | after a gateway restart: egress restored (dc-net rejoin + iptables refresh), private daemon reachable, root grant persists, sidecar running |
-| helm on k3d | ✅ pass | scaffold a chart, `helm install --wait` → release deployed, pod Running |
-| kind | ✅ pass | kubeadm node + systemd-in-container, `kind load docker-image`, pod from sideloaded image Ready |
+| helm | ⛔ limitation | `helm template` (client-side) works; the k3d cluster it needs uses `--privileged` nodes → **refused by the filter** (asserted) |
+| kind | ⛔ limitation | kubeadm nodes are `--privileged` → **refused by the filter** (asserted) |
+| dind-in-dind (nested²) | ⛔ limitation | level-2 dind is `--privileged` → refused; single-level nesting still works |
 | toolchain: pip | ✅ pass | `pip install` through the MITM (PIP_CERT fix — pip's certifi bundle) |
 | toolchain: maven/JVM | ✅ pass | reaches Maven Central through the MITM, JVM trusts the CA (no TLS error) via ca-certificates-java |
 | **in-place update** | ✅ pass | rule + grant + action-policy + settings + folder-mapping + devcontainer all survive a gateway update (re-init, same volume/token); docker access restored + enforcing |

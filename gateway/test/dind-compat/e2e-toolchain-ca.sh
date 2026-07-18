@@ -32,9 +32,15 @@ echo "$resp" | grep -q '"id"' && pass "devcontainer started" || { fail "start: $
 for i in $(seq 1 60); do docker exec -u vscode "$DC" docker version >/dev/null 2>&1 && break; sleep 2; done
 X() { docker exec -u vscode "$DC" bash -lc "$1"; }
 
-# git over HTTPS (uses system CA)
-X 'git clone --depth 1 https://github.com/octocat/Hello-World.git /tmp/hw >/dev/null 2>&1 && test -f /tmp/hw/README' \
-  && pass "git clone over HTTPS through MITM" || { fail "git clone over HTTPS"; rc=1; }
+# git over HTTPS (uses system CA). Retry: this is the FIRST egress op, so the MITM
+# proxy may still be warming its per-host leaf-cert cache — the first request to a
+# freshly-allowlisted host can fail before the cert is minted (cold-start race).
+gitok=""
+for i in $(seq 1 10); do
+  X 'rm -rf /tmp/hw; git clone --depth 1 https://github.com/octocat/Hello-World.git /tmp/hw >/dev/null 2>&1 && test -f /tmp/hw/README' && { gitok=1; break; }
+  sleep 3
+done
+[ -n "$gitok" ] && pass "git clone over HTTPS through MITM" || { fail "git clone over HTTPS"; rc=1; }
 
 # go (system cert pool) — install via apt then module download
 if X 'sudo apt-get update -qq >/dev/null 2>&1 && sudo apt-get install -y -qq golang-go >/dev/null 2>&1'; then
