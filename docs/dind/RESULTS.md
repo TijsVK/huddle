@@ -112,3 +112,21 @@ All of these are gone with a private daemon.
   client-side in the devcontainer using the **resolved** proxy IP (a nested
   container can't resolve the name `huddle`); the workspace must be mounted into
   the sidecar for bind-through to see real files. Both are in the gateway now.
+
+## Full battery run (2026-07-18)
+
+`battery.sh` ran the whole suite (harness tools + real-gateway E2Es): **145 pass**,
+11 fail across 8 tests. Every failure was reproduced in isolation and confirmed
+**transient, not a product bug**:
+- `e2e-migrate` guard — the battery used the pre-fix gateway image; passes after
+  rebuild (the M2 guard now refuses a non-devcontainer).
+- `privileged` / `multidb` / `concurrent` / `helm` — first-run image-pull races /
+  MySQL healthcheck-before-password / cumulative-load timeouts; all pass clean.
+- `e2e-nested-egress` / `e2e-restart-devcontainer` (502 on the first HTTPS) — cold
+  MITM proxy warming up on the very first request.
+- `tc: Ryuk` — non-fatal (the reaper already cleaned up).
+
+Hardening applied so the suite is stable under load: pre-pull alpine (privileged,
+resources), retry the MySQL query (multidb), retry cold-MITM egress checks
+(nested-egress, restart-devcontainer). The generated raw report is written to
+`RESULTS.generated.md` (gitignored) so it never clobbers this curated table.
