@@ -1,7 +1,17 @@
 # CRITICAL: DinD privileged host escape (finding C1)
 
-**Status: MITIGATED (2026-07-18) — host-escape filter enforced on the private
-daemon. Escape red test `gateway/test/dind-compat/e2e-escape.sh` is GREEN.**
+**Status: MITIGATED (2026-07-18) — enforced by a dockerd AUTHORIZATION PLUGIN on
+the private daemon. Escape red test `gateway/test/dind-compat/e2e-escape.sh` is
+GREEN.**
+
+> **History:** the first mitigation was a socket-proxy *filter* in front of an
+> `inner.sock`. Adversarial review found it bypassable two ways — (1) the
+> devcontainer mounted the dir holding both the filter socket AND the raw
+> `inner.sock`, so `curl --unix-socket inner.sock` skipped the filter; (2) even
+> split, a nested container could symlink a shared workspace path to the sidecar's
+> socket dir and bind through it (dockerd follows symlink bind sources; a lexical
+> guard can't stop it). Both verified live. The fix below (an authz plugin) removes
+> the unfiltered socket entirely, so neither bypass exists.
 
 ## The issue
 In DinD mode each devcontainer gets an unrestricted private Docker daemon whose
@@ -24,45 +34,48 @@ The design premise ("only the sidecar is privileged, isolation preserved") was
 runs inside the daemon.
 
 ## The mitigation (implemented)
-A lean per-container **host-escape filter** (`gateway/src/dind-filter.ts`) sits
-between the devcontainer and its private daemon:
+The sidecar dockerd runs with **`--authorization-plugin=huddle-authz`**
+(`gateway/src/dind-authz.ts`). dockerd calls the plugin for EVERY API request
+before executing it, so the guard is enforced on the daemon's single socket —
+there is no second, unfiltered path to reach.
 
-- Socket topology: the sidecar `dockerd` listens on `inner.sock`; the gateway
-  serves `docker.sock` (the filter) in the shared dir `/tmp/dc-sockets/<name>`
-  (mounted `/var/run/dind` in both sidecar and devcontainer). The devcontainer's
-  `DOCKER_HOST` points at the **filter**, never `inner.sock` directly.
-- It is a real streaming HTTP/1.1 proxy: it parses **every** request on a keep-
-  alive connection (so a privileged create pipelined after a benign request can't
-  be smuggled past inspection) and forwards each unmodified. On a hijack
-  (interactive exec/attach) it raw-tunnels the rest, preserving **half-open**
-  (docker's exec streams half-close stdin then read output — without half-open the
-  output is silently dropped: the bug the manual Aspire probe surfaced).
-- On `POST /containers/create` it runs `validateDindEscape(HostConfig)` and denies
-  with `403` only the **device/kernel/namespace** vectors: `Privileged`,
+- Socket topology: the sidecar `dockerd` listens on its own `docker.sock` (in
+  `/tmp/dc-sockets/<name>/outer`, mounted `/var/run/dind` in the sidecar AND the
+  devcontainer); the gateway serves the plugin socket
+  `/tmp/dc-sockets/<name>/plugin/huddle-authz.sock`, mounted into the sidecar at
+  `/run/docker/plugins` (dockerd's plugin-discovery path). There is **no
+  `inner.sock`** — the devcontainer talks to `docker.sock` directly and dockerd
+  enforces authz on it. The plugin socket speaks the authz protocol only (useless
+  as a docker client), so reaching it grants nothing.
+- On `POST /containers/create` the plugin runs `validateDindEscape(HostConfig)`
+  and denies (`403`) the **device/kernel/namespace** vectors: `Privileged`,
   `Devices`/`DeviceCgroupRules`/`DeviceRequests`, `CapAdd`, host `PidMode`/
   `IpcMode`/`UsernsMode`/`CgroupnsMode`/`UTSMode`, `CgroupParent`, `Sysctls`,
-  unconfined `SecurityOpt`, per-device Blkio limits.
-- **Binds/Mounts/VolumesFrom stay ALLOWED** — in DinD a bind source resolves
-  against the *disposable sidecar* fs, not the host, so compose/testcontainers
-  workspace mounts work. The one exception: a bind whose source reaches the
-  daemon's own control socket dir (`/var/run/dind`, `/run/dind`, or any ancestor
-  like `/var/run` / `/run` / `/`) is denied — that would let a nested container
-  talk to the UNFILTERED `inner.sock` and bypass the filter.
+  per-device Blkio limits, non-default `SecurityOpt` (any custom seccomp/apparmor,
+  not just literal `unconfined` — finding #8), and an **unmask of the default
+  MaskedPaths/ReadonlyPaths** (`/proc/kcore`, `/proc/sysrq-trigger` — finding #3).
+- On `POST /containers/{id}/exec` it runs `validateExecEscape` (privileged/CapAdd
+  exec — finding #7). The request path is normalized (version prefix, `//`,
+  percent-encoding) before matching so a crafted create path can't dodge
+  inspection (finding #6).
+- **Binds/Mounts/VolumesFrom are fully ALLOWED** — under authz there is no
+  unfiltered socket, so binding the docker socket (Testcontainers Ryuk / docker-
+  outside-of-docker) just yields another authz-guarded client, and a host-path
+  bind resolves against the disposable sidecar fs. No bind guard is needed.
 
-Net effect: the escape is closed **and** the tool-compat wins the classic socket-
-proxy broke (inspect, networks, port-publish, archive/CopyFile, exec, build,
-non-privileged run, host-path binds) all work. This is strictly better than the
-classic proxy on compat while matching it on host-escape safety.
+Because dockerd handles the request stream natively, the old proxy's hijack/
+half-open/chunked-parsing complexity is gone (findings #4/#5/#6 dissolve).
+
+Net effect: the escape is closed **and** all tool-compat works — inspect,
+networks, port-publish, archive/CopyFile, exec (streams), build (incl. BuildKit
+default builder), non-privileged run, host-path binds, Testcontainers Ryuk.
 
 ## Cost / known limitation
 Tools that need a genuinely `--privileged` nested container (kind/k3d/minikube
 worker nodes, dind-in-dind, some nested-systemd setups) are refused in DinD mode.
-Everything else works, including **Testcontainers with its Ryuk reaper**: binding
-the FILTER socket (`/var/run/dind/docker.sock`) into a nested container is allowed
-because that container then talks THROUGH the filter and still cannot create a
-privileged/escaping container (verified live in `e2e-escape.sh`). Only the
-UNFILTERED `inner.sock` / the socket dir / its ancestors are refused. Aspire,
-compose, buildx (default builder), Testcontainers all work.
+If the gateway process is down, dockerd fails requests closed until the plugin
+reconnects (the plugin is re-established on gateway restart, before the sidecar is
+(re)started). Aspire, compose, buildx (default builder), Testcontainers all work.
 
 ## Rejected alternatives
 - **Rootless dind** — incompatible with the shared-netns model (rootlesskit needs
@@ -75,9 +88,13 @@ compose, buildx (default builder), Testcontainers all work.
   (runc/cgroup fifo errors).
 
 ## Tests
-- `gateway/test/dind-compat/e2e-escape.sh` — live red test: privileged/device
-  escape refused, host fs unreachable, socket-dir bypass closed, benign bind still
-  forwarded.
-- `gateway/test/dind-filter.test.ts` — unit + socket-level: create inspection,
-  hijack half-open output delivery, pipelining, `validateDindEscape` edge cases.
-- `gateway/test/dind-compat/tools/privileged.sh` — compat-battery variant.
+- `gateway/test/dind-compat/e2e-escape.sh` — live red test: no `inner.sock`; raw
+  privileged create over `docker.sock` is authz-denied (403); privileged/device
+  refused; host fs unreachable; no unfiltered socket reachable by a nested bind;
+  docker.sock passthrough stays authz-guarded; MaskedPaths unmask refused; benign
+  bind still works.
+- `gateway/test/dind-authz.test.ts` — unit: `authorize()` create/exec inspection,
+  path-normalization, fail-closed, and `validateDindEscape`/`validateExecEscape`
+  edge cases (findings #3/#6/#7/#8).
+- `gateway/test/dind-compat/tools/privileged.sh` — compat-battery variant (runs the
+  real authz plugin via `authz-runner.mjs`).

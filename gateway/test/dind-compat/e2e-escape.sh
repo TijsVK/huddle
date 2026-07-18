@@ -33,6 +33,17 @@ pass "setup: alpine image present (escape attempts will use it)"
 
 HOST_HN=$(hostname)
 
+# 0. CRITICAL (findings #1/#2): there must be NO unfiltered daemon socket. With the
+#    authz-plugin model dockerd exposes only docker.sock (authz-guarded); the old
+#    inner.sock is gone. So inner.sock must not exist in the devcontainer's mount,
+#    and docker.sock must actually enforce authz (a raw privileged create over it
+#    is denied), not be a second unguarded daemon.
+if docker exec -u vscode "$DC" test -S /var/run/dind/inner.sock 2>/dev/null; then
+  fail "inner.sock present in the devcontainer (should not exist under authz)"; rc=1
+else pass "no inner.sock in the devcontainer"; fi
+raw=$(docker exec -u vscode "$DC" sh -c 'curl -s -o /dev/null -w "%{http_code}" --unix-socket /var/run/dind/docker.sock -X POST -H "content-type: application/json" --data "{\"Image\":\"alpine:3.20\",\"HostConfig\":{\"Privileged\":true}}" http://x/v1.43/containers/create 2>/dev/null' 2>/dev/null | tr -d '[:space:]')
+[ "$raw" = 403 ] && pass "raw privileged create over docker.sock is authz-denied (403)" || { fail "raw privileged create not denied (HTTP $raw) — authz not enforcing"; rc=1; }
+
 # 1. A --privileged nested container must be REFUSED (the primary escape vector).
 if docker exec -u vscode "$DC" docker run --rm --privileged alpine:3.20 true >/dev/null 2>&1; then
   fail "--privileged nested container ALLOWED (escape vector open)"; rc=1
@@ -62,28 +73,32 @@ else pass "nested container cannot mount/read the host filesystem"; fi
 hb=$(docker exec -u vscode "$DC" docker run --rm -v /:/hostroot:ro alpine:3.20 cat /hostroot/etc/hostname 2>/dev/null | tr -d '[:space:]')
 [ "$hb" = "$HOST_HN" ] && { fail "host-path bind reached the host root ($hb)"; rc=1; } || pass "host-path bind does not reach the host root"
 
-# 5. Filter-bypass: binding the private daemon's socket dir would let a nested
-#    container talk to the UNFILTERED dockerd and then run --privileged. Must be
-#    refused for the dir, its ancestors, and the /run symlink alias.
+# 5. No UNFILTERED daemon socket exists anywhere a nested bind could reach. With
+#    the authz-plugin model dockerd has ONE socket (docker.sock, authz-guarded);
+#    there is no inner.sock, so scanning the plausible locations finds nothing.
 bypass=0
 for src in /var/run/dind /run/dind /var/run /run /; do
-  if docker exec -u vscode "$DC" docker run --rm -v "$src:/d" alpine:3.20 sh -c 'test -S /d/inner.sock' >/dev/null 2>&1; then
-    fail "socket-dir bypass via $src reached inner.sock"; bypass=1; rc=1
-  fi
+  found=$(docker exec -u vscode "$DC" docker run --rm -v "$src:/d" alpine:3.20 sh -c 'find /d -maxdepth 3 -name inner.sock 2>/dev/null | head -1' 2>/dev/null | tr -d '[:space:]')
+  [ -n "$found" ] && { fail "found an inner.sock via $src ($found)"; bypass=1; rc=1; }
 done
-[ "$bypass" = 0 ] && pass "no socket-dir bind reaches the unfiltered daemon (filter bypass closed)"
+[ "$bypass" = 0 ] && pass "no unfiltered daemon socket reachable by a nested bind"
 
-# 5b. Binding the FILTER socket (docker.sock) IS allowed (Testcontainers Ryuk /
-#     docker-outside-of-docker) — but it stays FILTERED: a --privileged create
-#     issued THROUGH it must still be refused.
+# 5b. Binding docker.sock (the real, authz-guarded socket) into a nested container
+#     IS allowed (Testcontainers Ryuk / docker-outside-of-docker) but stays
+#     guarded: a --privileged create issued THROUGH it must still be refused.
 docker exec -u vscode "$DC" docker pull -q docker:28-cli >/dev/null 2>&1
 dood=$(docker exec -u vscode "$DC" docker run --rm -v /var/run/dind/docker.sock:/var/run/docker.sock docker:28-cli \
   sh -c 'docker run --rm --privileged alpine:3.20 true 2>&1' | tr -d '\r')
-if printf '%s' "$dood" | grep -q "not permitted"; then
-  pass "filter-socket passthrough stays filtered (privileged-through-Ryuk refused)"
+if printf '%s' "$dood" | grep -qi "denied\|not permitted"; then
+  pass "docker.sock passthrough stays authz-guarded (privileged-through-Ryuk refused)"
 else
-  fail "privileged create through the bound filter socket was NOT refused ($dood)"; rc=1
+  fail "privileged create through the bound docker.sock was NOT refused ($dood)"; rc=1
 fi
+
+# 5c. MaskedPaths unmask (finding #3): a create that clears /proc/kcore's mask
+#     (host kernel memory) must be refused even without --privileged.
+mp=$(docker exec -u vscode "$DC" sh -c 'curl -s -o /dev/null -w "%{http_code}" --unix-socket /var/run/dind/docker.sock -X POST -H "content-type: application/json" --data "{\"Image\":\"alpine:3.20\",\"HostConfig\":{\"MaskedPaths\":[]}}" http://x/v1.43/containers/create 2>/dev/null' 2>/dev/null | tr -d '[:space:]')
+[ "$mp" = 403 ] && pass "MaskedPaths unmask refused (finding #3)" || { fail "MaskedPaths unmask not refused (HTTP $mp)"; rc=1; }
 
 # 6. A benign (non-socket) host-path bind MUST still be forwarded — the DinD
 #    compat win (compose/testcontainers workspace mounts). It resolves against the

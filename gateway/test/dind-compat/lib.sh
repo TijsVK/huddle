@@ -33,39 +33,46 @@ up() {
   local dc="${PREFIX}-${name}" dind="${PREFIX}-${name}-dind"
   local data="${PREFIX}-${name}-data" work="${PREFIX}-${name}-work"
   local sockdir="/tmp/dindc-sock/${name}"
+  # Authz model (mirrors the gateway): dockerd runs with
+  # --authorization-plugin=huddle-authz and listens on its OWN docker.sock; the
+  # host serves the plugin socket that dockerd calls before every request. No
+  # unfiltered socket exists, so there is nothing to bypass.
+  #   outer/  → sidecar (dockerd docker.sock) + devcontainer
+  #   plugin/ → host (authz-runner) + sidecar (at /run/docker/plugins)
+  local outerdir="$sockdir/outer" plugindir="$sockdir/plugin"
   docker rm -f "$dc" "$dind" >/dev/null 2>&1 || true
   docker volume rm "$data" "$work" >/dev/null 2>&1 || true
-  # Kill a stale filter for this name, then reset the shared host sock dir.
-  [ -f "$sockdir/filter.pid" ] && kill "$(cat "$sockdir/filter.pid")" 2>/dev/null || true
-  rm -rf "$sockdir"; mkdir -p "$sockdir"; chmod 0777 "$sockdir"
+  [ -f "$sockdir/authz.pid" ] && kill "$(cat "$sockdir/authz.pid")" 2>/dev/null || true
+  rm -rf "$sockdir"; mkdir -p "$outerdir" "$plugindir"; chmod 0777 "$sockdir" "$outerdir" "$plugindir"
   docker volume create "$data" >/dev/null
   docker volume create "$work" >/dev/null
-  # /work is a workspace volume shared by BOTH devcontainer and sidecar at the
-  # same path — exactly what the gateway now does with the real workspace so that
-  # bind-mounting workspace paths into nested containers sees real files.
-  # The devcontainer's DOCKER_HOST points at the FILTER socket (docker.sock).
+  # Start the authz plugin on the host BEFORE dockerd, so the socket is present
+  # when dockerd loads the plugin (dockerd fails requests closed otherwise).
+  node "$HERE/authz-runner.mjs" "$name" "$plugindir/huddle-authz.sock" >"$sockdir/authz.log" 2>&1 &
+  echo $! > "$sockdir/authz.pid"
+  for i in $(seq 1 40); do [ -S "$plugindir/huddle-authz.sock" ] && break; sleep 0.25; done
+  # /work is a workspace volume shared by BOTH devcontainer and sidecar at the same
+  # path (bind-mounting workspace paths into nested containers sees real files).
+  # The devcontainer mounts outer/ (dockerd's authz-guarded docker.sock).
   docker run -d --name "$dc" --network "$net" \
-    -v "$sockdir":/var/run/dind -v "$work":/work \
+    -v "$outerdir":/var/run/dind -v "$work":/work \
     -e DOCKER_HOST=unix:///var/run/dind/docker.sock \
     --cap-add NET_ADMIN \
     "$TESTDC_IMAGE" sleep infinity >/dev/null || { fail "$name: devcontainer failed to start"; return 1; }
-  # Sidecar dockerd listens on inner.sock (the filter fronts it as docker.sock).
+  # Sidecar: dockerd on outer/docker.sock with the authz plugin (plugin/ mounted
+  # at dockerd's discovery path /run/docker/plugins).
   docker run -d --name "$dind" --privileged \
     --network "container:${dc}" \
-    -v "$sockdir":/var/run/dind -v "$data":/var/lib/docker -v "$work":/work \
+    -v "$outerdir":/var/run/dind -v "$plugindir":/run/docker/plugins -v "$data":/var/lib/docker -v "$work":/work \
     -e DOCKER_TLS_CERTDIR= \
-    "$DIND_IMAGE" sh -c 'if [ -f /sys/fs/cgroup/cgroup.controllers ]; then mkdir -p /sys/fs/cgroup/init 2>/dev/null||true; xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null||true; sed -e "s/ / +/g" -e "s/^/+/" < /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null||true; fi; dockerd --host=unix:///var/run/dind/inner.sock --mtu=1400 & DPID=$!; i=0; while [ ! -S /var/run/dind/inner.sock ] && [ $i -lt 120 ]; do sleep 0.5; i=$((i+1)); done; chmod 0666 /var/run/dind/inner.sock 2>/dev/null || true; wait $DPID' >/dev/null \
+    "$DIND_IMAGE" sh -c 'if [ -f /sys/fs/cgroup/cgroup.controllers ]; then mkdir -p /sys/fs/cgroup/init 2>/dev/null||true; xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null||true; sed -e "s/ / +/g" -e "s/^/+/" < /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null||true; fi; dockerd --host=unix:///var/run/dind/docker.sock --authorization-plugin=huddle-authz --mtu=1400 & DPID=$!; i=0; while [ ! -S /var/run/dind/docker.sock ] && [ $i -lt 120 ]; do sleep 0.5; i=$((i+1)); done; chmod 0666 /var/run/dind/docker.sock 2>/dev/null || true; wait $DPID' >/dev/null \
     || { fail "$name: dind sidecar failed to start"; return 1; }
-  # Start the real filter on the host (docker.sock -> inner.sock).
-  node "$HERE/filter-runner.mjs" "$name" "$sockdir/docker.sock" "$sockdir/inner.sock" \
-    >"$sockdir/filter.log" 2>&1 &
-  echo $! > "$sockdir/filter.pid"
   local i
   for i in $(seq 1 90); do
     docker exec "$dc" docker version >/dev/null 2>&1 && return 0
     sleep 1
   done
-  fail "$name: dind daemon did not become ready"; cat "$sockdir/filter.log" >&2 2>/dev/null; return 1
+  fail "$name: dind daemon did not become ready"; cat "$sockdir/authz.log" >&2 2>/dev/null; return 1
 }
 
 # dcsh <name> "<script>" — run a shell script inside the devcontainer.
@@ -76,7 +83,7 @@ dcshu() { docker exec -i -u "$2" "${PREFIX}-$1" bash -lc "$3"; }
 
 down() {
   local name="$1"; local sockdir="/tmp/dindc-sock/${name}"
-  [ -f "$sockdir/filter.pid" ] && kill "$(cat "$sockdir/filter.pid")" 2>/dev/null || true
+  [ -f "$sockdir/authz.pid" ] && kill "$(cat "$sockdir/authz.pid")" 2>/dev/null || true
   docker rm -f "${PREFIX}-${name}" "${PREFIX}-${name}-dind" >/dev/null 2>&1 || true
   docker volume rm "${PREFIX}-${name}-data" "${PREFIX}-${name}-work" >/dev/null 2>&1 || true
   rm -rf "$sockdir"

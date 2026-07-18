@@ -1,7 +1,7 @@
 // Host-escape HostConfig policy — PURE (no db/native imports) so it can be reused
-// by the socket-proxy, the DinD filter, AND a standalone filter runner (the
-// dind-compat harness) without dragging in better-sqlite3. See socket-proxy.ts
-// (classic proxy) and dind-filter.ts (DinD host-escape filter) for callers.
+// by the classic socket-proxy AND the DinD authorization plugin (and a standalone
+// authz runner in the dind-compat harness) without dragging in better-sqlite3.
+// See socket-proxy.ts (classic proxy) and dind-authz.ts (DinD authz plugin).
 
 // Device/kernel/namespace hard-denies: the vectors that give a container direct
 // host-kernel/device access regardless of filesystem. Apply to BOTH the classic
@@ -26,15 +26,43 @@ export function validateKernelEscape(hostConfig: any): string | null {
   }
   const sys = hostConfig.Sysctls;
   if (sys && typeof sys === 'object' && Object.keys(sys).length > 0) return 'Sysctls not permitted';
+  // Clearing/shrinking the default masks exposes host kernel state regardless of
+  // namespaces: /proc/kcore (host kernel memory), /proc/sysrq-trigger (host DoS/
+  // panic), etc. (review finding #3). The Docker CLI normally sends these arrays
+  // POPULATED with the defaults, so we only refuse when the critical entries are
+  // MISSING — i.e. an explicit unmask ([] or a shrunk list).
+  if (Array.isArray(hostConfig.MaskedPaths) && !hostConfig.MaskedPaths.includes('/proc/kcore'))
+    return 'MaskedPaths must keep the default masks (/proc/kcore)';
+  if (Array.isArray(hostConfig.ReadonlyPaths) && !hostConfig.ReadonlyPaths.includes('/proc/sysrq-trigger'))
+    return 'ReadonlyPaths must keep the default read-only paths (/proc/sysrq-trigger)';
   if (Array.isArray(hostConfig.SecurityOpt)) {
     for (const opt of hostConfig.SecurityOpt) {
       if (typeof opt !== 'string') continue;
       const norm = opt.toLowerCase().replace(/\s+/g, '');
-      if (norm === 'apparmor=unconfined' || norm === 'seccomp=unconfined' || norm === 'label=disable' ||
-          norm === 'systempaths=unconfined' || norm === 'no-new-privileges=false')
+      // Refuse ANY non-default seccomp/apparmor (finding #8): an inline permissive
+      // profile (`seccomp=<allow-all-json>`) evades a literal "unconfined" match.
+      // The only accepted forms keep the daemon default.
+      const key = norm.split('=')[0];
+      if ((key === 'seccomp' || key === 'apparmor')) {
+        if (norm !== 'seccomp=default' && norm !== 'apparmor=default' &&
+            norm !== 'seccomp=builtin' && norm !== 'apparmor=docker-default')
+          return `SecurityOpt ${opt} not permitted`;
+      }
+      if (norm === 'label=disable' || norm === 'systempaths=unconfined' || norm === 'no-new-privileges=false')
         return `SecurityOpt ${opt} not permitted`;
     }
   }
+  return null;
+}
+
+// Exec-create (POST /containers/{id}/exec) carries Privileged / capability fields
+// at the TOP LEVEL (not under HostConfig). `docker exec --privileged` grants the
+// full capability set to the exec process inside a nested container — inspect it
+// too (review finding #7). Returns a denial reason or null.
+export function validateExecEscape(execBody: any): string | null {
+  if (!execBody || typeof execBody !== 'object') return null;
+  if (execBody.Privileged === true) return 'privileged exec not permitted';
+  if (Array.isArray(execBody.CapAdd) && execBody.CapAdd.length > 0) return 'exec CapAdd not permitted';
   return null;
 }
 
@@ -62,68 +90,14 @@ export function validateHostConfigEscape(hostConfig: any): string | null {
   return null;
 }
 
-// Normalize a POSIX path: collapse `.`/`..`/duplicate slashes, drop trailing
-// slash (except root). Used to defeat `..`-based evasions of the socket-dir guard.
-function normPosix(p: string): string {
-  const abs = p.startsWith('/');
-  const parts: string[] = [];
-  for (const seg of p.split('/')) {
-    if (seg === '' || seg === '.') continue;
-    if (seg === '..') { if (parts.length) parts.pop(); continue; }
-    parts.push(seg);
-  }
-  return (abs ? '/' : '') + parts.join('/') || (abs ? '/' : '.');
-}
-
-// The private daemon's control sockets live here (bind-mounted into the sidecar).
-// A nested container that bind-mounts this dir — or any ANCESTOR of it (/, /var,
-// /var/run, …) — reaches inner.sock and talks to the UNFILTERED dockerd, escaping
-// the host-escape guard. `/var/run` is a symlink to `/run` on the Alpine dind
-// image, so guard both roots. This is the ONE bind DinD must refuse.
-const DIND_SOCKET_DIRS = ['/var/run/dind', '/run/dind'];
-// Binding the FILTER socket itself (docker.sock) into a nested container is SAFE
-// — that container then talks THROUGH the filter, so it still can't create a
-// privileged/host-escaping container. This is exactly what Testcontainers' Ryuk
-// reaper (and other docker-outside-of-docker helpers) need, so allow it. Only
-// inner.sock / the dir / ancestors (which expose the UNFILTERED daemon) are
-// refused.
-const DIND_FILTER_SOCKS = ['/var/run/dind/docker.sock', '/run/dind/docker.sock'];
-function bindReachesDindSocket(src: string): boolean {
-  if (!src.startsWith('/')) return false; // named volume / relative → not a host path
-  const p = normPosix(src);
-  if (DIND_FILTER_SOCKS.includes(p)) return false; // filtered socket passthrough is fine
-  if (p === '/') return true;
-  for (const sock of DIND_SOCKET_DIRS) {
-    if (p === sock) return true;                 // the socket dir itself
-    if (p.startsWith(sock + '/')) return true;   // inner.sock or anything else under it
-    if (sock.startsWith(p + '/')) return true;   // p is an ancestor of it
-  }
-  return false;
-}
-
-// DinD variant: the sidecar is a DISPOSABLE private daemon, so a bind source
-// resolves against the SIDECAR filesystem, not the host — ordinary host-path
-// binds (workspace files for compose/testcontainers) are safe and MUST work. The
-// only bind that matters is one reaching the daemon's control socket (which would
-// bypass this very filter); plus the shared kernel/device denies. Returns a
-// denial reason or null.
+// DinD escape policy, enforced by the dockerd authorization plugin (dind-authz.ts).
+// Because dockerd enforces this on EVERY request to its single socket, there is no
+// unfiltered daemon path to reach — so binds need NO special handling: binding the
+// docker socket (Testcontainers Ryuk / docker-outside-of-docker) just yields another
+// authz-guarded client, and binding a host path resolves against the disposable
+// sidecar fs. Only the device/kernel/namespace/masked-path vectors matter here.
+// Returns a denial reason or null.
 export function validateDindEscape(hostConfig: any): string | null {
   if (!hostConfig || typeof hostConfig !== 'object') return null;
-  const kernel = validateKernelEscape(hostConfig);
-  if (kernel) return kernel;
-  if (Array.isArray(hostConfig.Binds)) {
-    for (const bind of hostConfig.Binds) {
-      if (typeof bind !== 'string') continue;
-      const src = bind.split(':')[0] ?? '';
-      if (bindReachesDindSocket(src)) return `bind of the private daemon socket path not permitted: ${bind}`;
-    }
-  }
-  if (Array.isArray(hostConfig.Mounts)) {
-    for (const mount of hostConfig.Mounts) {
-      if (!mount || mount.Type !== 'bind') continue;
-      if (typeof mount.Source === 'string' && bindReachesDindSocket(mount.Source))
-        return `bind of the private daemon socket path not permitted: ${mount.Source}`;
-    }
-  }
-  return null;
+  return validateKernelEscape(hostConfig);
 }

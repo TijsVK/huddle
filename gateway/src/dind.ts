@@ -27,30 +27,39 @@
 import fs from 'fs';
 import { dockerRequest } from './docker';
 import { getCaCertPem } from './tls-ca';
-import { createDindFilter, removeDindFilter } from './dind-filter';
+import { createDindAuthz, removeDindAuthz } from './dind-authz';
 
 const DIND_IMAGE = process.env.HUDDLE_DIND_IMAGE ?? 'docker:28-dind';
 
-// Socket topology (C1 mitigation): the sidecar dockerd listens on `inner.sock`
-// and the gateway runs a host-escape FILTER (dind-filter.ts) that serves
-// `docker.sock`; the devcontainer's DOCKER_HOST points at the filter. Both live
-// in the shared host dir /tmp/dc-sockets/<name> (the one dir the long-running
-// gateway can reach), mounted at /var/run/dind in the sidecar AND the devcontainer.
+// Socket topology (C1 mitigation via a dockerd AUTHORIZATION PLUGIN — dind-authz.ts).
+// The sidecar dockerd runs with `--authorization-plugin=huddle-authz` and listens
+// on its OWN real socket `docker.sock`; the gateway serves the authz plugin socket
+// that dockerd calls before every request. There is NO second "unfiltered" socket
+// (the old inner.sock/filter split was bypassable — review findings #1/#2), so the
+// devcontainer talks to docker.sock directly and dockerd enforces the guard.
+//   <sockdir>/outer/docker.sock        → SIDECAR (dockerd listens) + DEVCONTAINER
+//   <sockdir>/plugin/huddle-authz.sock → GATEWAY (serves) + SIDECAR (at /run/docker/plugins)
 export const SOCKET_DIR = '/tmp/dc-sockets';
 export const DIND_SOCKET_MOUNT = '/var/run/dind';
-export const DIND_SOCKET_PATH = `${DIND_SOCKET_MOUNT}/docker.sock`;   // filter (devcontainer-facing)
-export const DIND_INNER_SOCK_PATH = `${DIND_SOCKET_MOUNT}/inner.sock`; // sidecar dockerd
+export const DIND_SOCKET_PATH = `${DIND_SOCKET_MOUNT}/docker.sock`;   // dockerd real socket (authz-guarded)
 export const DIND_DOCKER_HOST = `unix://${DIND_SOCKET_PATH}`;
+export const DIND_PLUGIN_MOUNT = '/run/docker/plugins';              // where dockerd discovers plugins
+export const AUTHZ_PLUGIN_NAME = 'huddle-authz';
 
-// Per-container socket dir on the host (== gateway's /tmp/dc-sockets/<name>).
+// Per-container socket tree on the host (== gateway's /tmp/dc-sockets/<name>).
 export function dindSockDir(containerName: string): string {
   return `${SOCKET_DIR}/${containerName}`;
 }
-export function dindFilterSockPath(containerName: string): string {
-  return `${dindSockDir(containerName)}/docker.sock`;
+// Devcontainer-facing dir — holds docker.sock (dockerd's own socket, authz-guarded).
+export function dindOuterDir(containerName: string): string {
+  return `${dindSockDir(containerName)}/outer`;
 }
-export function dindInnerSockPath(containerName: string): string {
-  return `${dindSockDir(containerName)}/inner.sock`;
+// Gateway-served authz plugin dir — mounted into the sidecar at /run/docker/plugins.
+export function dindPluginDir(containerName: string): string {
+  return `${dindSockDir(containerName)}/plugin`;
+}
+export function dindPluginSockPath(containerName: string): string {
+  return `${dindPluginDir(containerName)}/${AUTHZ_PLUGIN_NAME}.sock`;
 }
 export function dindDataVolume(containerName: string): string {
   return `huddle-dind-data-${containerName}`;
@@ -106,12 +115,15 @@ async function ensureVolume(name: string, parent: string): Promise<void> {
   }
 }
 
-// De gedeelde socket-DIR (host-bind, geen named volume) moet bestaan vóór de
-// devcontainer start: de gateway moet inner.sock kunnen bereiken om er de
-// host-escape filter voor te zetten. Aangeroepen vanuit createAndStartContainer.
+// The host socket dirs must exist before the containers start: `outer/` holds
+// dockerd's docker.sock (mounted into the sidecar AND devcontainer), `plugin/`
+// holds the gateway-served authz socket (mounted into the sidecar). Called from
+// createAndStartContainer.
 export async function ensureDindSockVolume(containerName: string): Promise<void> {
-  try { fs.mkdirSync(dindSockDir(containerName), { recursive: true, mode: 0o777 }); } catch {}
-  try { fs.chmodSync(dindSockDir(containerName), 0o777); } catch {}
+  for (const d of [dindOuterDir(containerName), dindPluginDir(containerName)]) {
+    try { fs.mkdirSync(d, { recursive: true, mode: 0o777 }); } catch {}
+    try { fs.chmodSync(d, 0o777); } catch {}
+  }
 }
 
 // Proxy-env voor geneste containers wordt NIET hier (in de sidecar) gezet: het
@@ -183,9 +195,13 @@ export async function createDindSidecar(
     `echo "$HUDDLE_CA_B64" | base64 -d > /usr/local/share/ca-certificates/huddle-ca.crt; ` +
     `update-ca-certificates 2>/dev/null || cat /usr/local/share/ca-certificates/huddle-ca.crt >> /etc/ssl/certs/ca-certificates.crt; ` +
     cgroupPrep +
-    `dockerd --host=unix://${DIND_INNER_SOCK_PATH} --mtu=1400 & DPID=$!; ` +
-    `i=0; while [ ! -S ${DIND_INNER_SOCK_PATH} ] && [ $i -lt 240 ]; do sleep 0.5; i=$((i+1)); done; ` +
-    `chmod 0666 ${DIND_INNER_SOCK_PATH} 2>/dev/null || true; wait $DPID`,
+    // dockerd listens on its own docker.sock and enforces our authorization
+    // plugin (huddle-authz) on every request — the C1 host-escape guard. dockerd
+    // discovers the plugin by name at /run/docker/plugins/huddle-authz.sock,
+    // which the gateway serves (bind-mounted in).
+    `dockerd --host=unix://${DIND_SOCKET_PATH} --authorization-plugin=${AUTHZ_PLUGIN_NAME} --mtu=1400 & DPID=$!; ` +
+    `i=0; while [ ! -S ${DIND_SOCKET_PATH} ] && [ $i -lt 240 ]; do sleep 0.5; i=$((i+1)); done; ` +
+    `chmod 0666 ${DIND_SOCKET_PATH} 2>/dev/null || true; wait $DPID`,
   ];
 
   const createBody = {
@@ -212,9 +228,10 @@ export async function createDindSidecar(
       NetworkMode: `container:${devcontainerId}`,
       Privileged: true,
       Mounts: [
-        // Shared host socket dir (bind), NOT a named volume: the gateway must be
-        // able to reach inner.sock to run the host-escape filter in front of it.
-        { Type: 'bind', Source: dindSockDir(containerName), Target: DIND_SOCKET_MOUNT },
+        // outer/ (dockerd's docker.sock) shared with the devcontainer; plugin/
+        // (the gateway-served authz socket) at dockerd's plugin-discovery path.
+        { Type: 'bind', Source: dindOuterDir(containerName), Target: DIND_SOCKET_MOUNT },
+        { Type: 'bind', Source: dindPluginDir(containerName), Target: DIND_PLUGIN_MOUNT },
         { Type: 'volume', Source: dindDataVolume(containerName), Target: '/var/lib/docker' },
         // Dezelfde workspace/folder-mounts als de devcontainer, op hetzelfde
         // doelpad, zodat bind-mounts van die paden in geneste containers de echte
@@ -233,29 +250,20 @@ export async function createDindSidecar(
     createBody,
   );
   const id: string = created.Id;
+
+  // Start the authz plugin BEFORE the sidecar so the socket exists when dockerd
+  // loads the plugin (dockerd fails requests closed if the plugin is unreachable).
+  await createDindAuthz(containerName, dindPluginSockPath(containerName));
+
   await dockerRequest('POST', `/containers/${id}/start`, {});
-
-  console.log(`[dind] sidecar ${name} started (netns of ${containerName})`);
-
-  // Wacht tot dockerd's inner.sock bestaat, zet er dan de host-escape filter
-  // (C1) voor. De devcontainer's DOCKER_HOST wijst naar de filter-socket, niet
-  // rechtstreeks naar inner.sock.
-  const innerHostPath = dindInnerSockPath(containerName);
-  for (let i = 0; i < 240 && !fs.existsSync(innerHostPath); i++) {
-    await new Promise(r => setTimeout(r, 500));
-  }
-  if (!fs.existsSync(innerHostPath)) {
-    console.warn(`[dind] inner.sock not present for ${containerName} after wait; filter not started`);
-  } else {
-    await createDindFilter(containerName, dindFilterSockPath(containerName), innerHostPath);
-  }
+  console.log(`[dind] sidecar ${name} started (netns of ${containerName}), authz plugin active`);
   return id;
 }
 
 // Sidecar + zijn volumes verwijderen wanneer de devcontainer wordt opgeruimd.
 export async function removeDindSidecar(containerName: string): Promise<void> {
   const name = dindContainerName(containerName);
-  removeDindFilter(containerName);
+  removeDindAuthz(containerName);
   try { await dockerRequest('DELETE', `/containers/${encodeURIComponent(name)}?force=true`); } catch {}
   try { await dockerRequest('DELETE', `/volumes/${encodeURIComponent(dindDataVolume(containerName))}?force=true`); } catch {}
   try { fs.rmSync(dindSockDir(containerName), { recursive: true, force: true }); } catch {}
@@ -285,22 +293,15 @@ export async function ensureDindSidecar(containerName: string, devcontainerId: s
   const name = dindContainerName(containerName);
   try {
     const info = await dockerRequest('GET', `/containers/${encodeURIComponent(name)}/json`);
+    // The sidecar survives a gateway restart (RestartPolicy) with dockerd still
+    // running under --authorization-plugin, but the plugin SERVER lives in the
+    // gateway process and is now gone — so dockerd fails every request closed
+    // until we re-establish it. Re-create the authz plugin BEFORE (re)starting so
+    // the socket is present when dockerd reconnects.
+    await createDindAuthz(containerName, dindPluginSockPath(containerName));
     if (!info?.State?.Running) {
       await dockerRequest('POST', `/containers/${encodeURIComponent(name)}/start`, {});
       console.log(`[dind] sidecar ${name} restarted`);
-    }
-    // De sidecar overleeft een gateway-herstart (RestartPolicy), maar de
-    // host-escape FILTER draait in het gateway-proces en is dan weg (de oude
-    // docker.sock is een dode inode). Herstel hem altijd zodat DOCKER_HOST van
-    // de devcontainer weer werkt na een herstart.
-    const innerHostPath = dindInnerSockPath(containerName);
-    for (let i = 0; i < 240 && !fs.existsSync(innerHostPath); i++) {
-      await new Promise(r => setTimeout(r, 500));
-    }
-    if (fs.existsSync(innerHostPath)) {
-      await createDindFilter(containerName, dindFilterSockPath(containerName), innerHostPath);
-    } else {
-      console.warn(`[dind] inner.sock missing for ${containerName}; filter not restored`);
     }
   } catch {
     const shared = await sharedMountsFromDevcontainer(devcontainerId);

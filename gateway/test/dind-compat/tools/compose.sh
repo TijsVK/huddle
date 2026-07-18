@@ -25,6 +25,10 @@ services:
         condition: service_healthy
 YAML
 
+# Pre-pull with retry: compose's own pull uses a short deadline and the registry
+# can be slow on the bridge network (transient "context deadline exceeded").
+dcsh "$NAME" 'for img in redis:7-alpine nginx:alpine; do for i in 1 2 3 4; do docker pull -q "$img" >/dev/null 2>&1 && break; sleep 3; done; done' >/dev/null 2>&1
+
 if dcsh "$NAME" 'cd /home/dev/app && docker compose up -d --wait' >/tmp/compose.log 2>&1; then
   pass "$NAME: compose up --wait (healthcheck gate satisfied)"
 else

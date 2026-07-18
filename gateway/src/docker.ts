@@ -6,7 +6,7 @@ import {
   createDindSidecar,
   ensureDindSockVolume,
   removeDindSidecar,
-  dindSockDir,
+  dindOuterDir,
   DIND_SOCKET_MOUNT,
   DIND_DOCKER_HOST,
   DIND_SOCKET_PATH,
@@ -996,12 +996,12 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
     }]),
     ...(DIND_ENABLED
       ? [{
-          // DinD: mount de gedeelde socket-DIR (host-bind) die de sidecar én de
-          // gateway-filter delen. De devcontainer's DOCKER_HOST wijst naar de
-          // filter-socket ${DIND_SOCKET_PATH} (host-escape guard, finding C1),
-          // niet rechtstreeks naar dockerd's inner.sock.
+          // DinD: mount ONLY the OUTER socket dir (docker.sock = the filter). The
+          // sidecar's inner.sock lives in a SEPARATE dir that is NOT mounted here,
+          // so the devcontainer physically cannot reach the unfiltered daemon
+          // (review finding #1). DOCKER_HOST → the filter (host-escape guard, C1).
           Type: 'bind' as const,
-          Source: dindSockDir(containerName),
+          Source: dindOuterDir(containerName),
           Target: DIND_SOCKET_MOUNT,
         }]
       : [{
