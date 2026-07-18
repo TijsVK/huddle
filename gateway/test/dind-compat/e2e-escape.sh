@@ -132,7 +132,14 @@ after=$(cat /proc/sys/kernel/core_pattern 2>/dev/null)
 if docker exec -u vscode "$DC" docker run --rm -v /proc/sys:/ps alpine:3.20 true >/dev/null 2>&1; then
   fail "/proc/sys bind ALLOWED (host kernel escape vector open)"; rc=1
 else pass "/proc/sys (host kernel) bind refused"; fi
-[ "$before" = "$after" ] && pass "host core_pattern unchanged by nested bind attempt" || { fail "HOST ESCAPE — core_pattern changed ($before -> $after)"; rc=1; }
+# 5g. The local-volume-driver bind-in-disguise (device=/proc/sys,o=bind) must also
+#     be refused (path lives in VolumeOptions.DriverConfig, not Mounts.Source).
+docker exec -u vscode "$DC" docker run --rm --mount 'type=volume,dst=/x,volume-driver=local,volume-opt=type=none,volume-opt=device=/proc/sys,volume-opt=o=bind' alpine:3.20 sh -c 'echo "|vp|" > /x/kernel/core_pattern' >/dev/null 2>&1
+if docker exec -u vscode "$DC" docker run --rm --mount 'type=volume,dst=/x,volume-driver=local,volume-opt=type=none,volume-opt=device=/proc/sys,volume-opt=o=bind' alpine:3.20 true >/dev/null 2>&1; then
+  fail "local-volume-driver /proc/sys bind ALLOWED (escape vector open)"; rc=1
+else pass "local-volume-driver /proc/sys bind refused"; fi
+after=$(cat /proc/sys/kernel/core_pattern 2>/dev/null)
+[ "$before" = "$after" ] && pass "host core_pattern unchanged by nested bind attempts" || { fail "HOST ESCAPE — core_pattern changed ($before -> $after)"; rc=1; }
 
 # 6. A benign (non-socket) host-path bind MUST still be forwarded — the DinD
 #    compat win (compose/testcontainers workspace mounts). It resolves against the

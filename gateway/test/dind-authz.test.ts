@@ -39,6 +39,16 @@ describe('dind-authz authorize()', () => {
   it('denies a host-kernel bind expressed as a Mount', () => {
     expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Mounts: [{ Type: 'bind', Source: '/proc/sys', Target: '/x' }] } }))).toMatch(/host kernel path/);
   });
+  // A local volume with device+o=bind is a bind in disguise — the path is in
+  // VolumeOptions.DriverConfig, not Mounts.Source (verified live: wrote host core_pattern).
+  it('denies a local-volume-driver device bind of a host kernel path', () => {
+    const m = { Type: 'volume', Target: '/x', VolumeOptions: { DriverConfig: { Name: 'local', Options: { type: 'none', device: '/proc/sys', o: 'bind' } } } };
+    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Mounts: [m] } }))).toMatch(/host kernel path/);
+  });
+  it('allows a local-volume-driver device bind of a benign path', () => {
+    const m = { Type: 'volume', Target: '/x', VolumeOptions: { DriverConfig: { Name: 'local', Options: { type: 'none', device: '/home/vscode/d', o: 'bind' } } } };
+    expect(authorize(req('POST', '/v1.45/containers/create', { HostConfig: { Mounts: [m] } }))).toBeNull();
+  });
   it('fails CLOSED when a create carries no inspectable body', () => {
     expect(authorize(req('POST', '/v1.45/containers/create'))).toMatch(/not available/);
   });

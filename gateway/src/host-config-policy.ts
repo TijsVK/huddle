@@ -164,8 +164,17 @@ function dindBindEscape(hc: any): string | null {
   }
   if (Array.isArray(hc.mounts)) {
     for (const m of hc.mounts) {
-      if (m && m.type === 'bind' && typeof m.source === 'string' && bindSourceSensitive(m.source))
+      if (!m) continue;
+      if (m.type === 'bind' && typeof m.source === 'string' && bindSourceSensitive(m.source))
         return `bind of a host kernel path not permitted: ${m.source}`;
+      // A `local` volume with a `device`+`o=bind` option is a bind mount in
+      // disguise — `--mount type=volume,volume-opt=device=/proc/sys,volume-opt=o=bind`
+      // reaches the host's rw /proc/sys and dodges the Binds/Mounts.Source check
+      // (verified live: wrote host core_pattern). The path lives in
+      // VolumeOptions.DriverConfig.Options.device. Guard it the same way.
+      const dev = m.volumeoptions?.driverconfig?.options?.device;
+      if (typeof dev === 'string' && bindSourceSensitive(dev))
+        return `volume device bind of a host kernel path not permitted: ${dev}`;
     }
   }
   return null;
