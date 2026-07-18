@@ -93,7 +93,7 @@ the filtering socket-proxy.
 - [x] Removed orphaned credentials endpoint (noot fully retired)
 - [x] Commit incrementally; pushed to TijsVK fork
 
-## STATUS (rolling): deep adversarial pass. 7 bugs fixed; ~30 automated tests.
+## STATUS (rolling): deep adversarial pass. 10 bugs fixed; ~30 automated tests.
 Battery: `gateway/test/dind-compat/battery.sh` (all harness tools + real-gateway
 E2Es -> docs/dind/RESULTS.md). Harness tools: compose, testcontainers, buildx,
 privileged, k3d, kind, helm, localstack, act, devcontainer-cli, workspace,
