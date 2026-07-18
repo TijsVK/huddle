@@ -50,7 +50,7 @@ for t in "${run_harness[@]}"; do [ -f "$HERE/tools/$t.sh" ] && runone "$t" bash 
 for e in "${run_e2e[@]}"; do [ -f "$HERE/$e.sh" ] && runone "$e" bash "$HERE/$e.sh" || log "skip $e (missing)"; done
 
 ALLRUN=("${run_harness[@]}" "${run_e2e[@]}")
-RESULTS="$REPO/docs/dind/RESULTS.md"
+RESULTS="$REPO/docs/dind/RESULTS.generated.md"
 {
   echo "# DinD tool-compatibility results"
   echo

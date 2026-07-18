@@ -20,7 +20,7 @@ declare -A BUDGET=(
   [workspace]=200 [isolation]=300 [kafka]=700 [compose-build]=300 [registry]=400 [resources]=250 [helm]=600 [kind]=700 [concurrent]=500 [nested2]=500 [exec-stream]=300 [egress]=500 [aspire]=1200
 )
 
-RESULTS="$HERE/../../../docs/dind/RESULTS.md"
+RESULTS="$HERE/../../../docs/dind/RESULTS.generated.md"
 OUTDIR="$(mktemp -d)"
 declare -A STATUS
 
