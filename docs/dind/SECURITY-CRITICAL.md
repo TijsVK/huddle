@@ -60,22 +60,39 @@ there is no second, unfiltered path to reach.
   finding #8), and any **MaskedPaths/ReadonlyPaths that is not a superset of runc's
   defaults** (an unmask of `/proc/kcore`, `/sys/firmware`, `/proc/sysrq-trigger`, …
   — findings #3/#4; `null`/omitted is fine, the daemon applies defaults).
-- **Host-kernel binds are denied** (finding #3): the sidecar is `--privileged`, so
-  its `/proc`, `/sys`, `/dev` are the HOST's *writable* kernel interfaces. A
-  nested `-v /proc/sys:/x` then `echo … > /x/kernel/core_pattern` sets the host's
-  core-dump handler → **host root** (verified live). The plugin refuses any bind
-  whose source is `/proc`, `/sys`, `/dev`, `/run/docker/plugins` or `/` — in
-  `Binds`, `Mounts[].source`, a `local` volume's `DriverConfig.device`, AND at
-  `POST /volumes/create` (a `local`-driver `device` bind is set at volume-create,
-  then referenced by name — round-3 finding #1, verified live). Ordinary binds
-  (workspace, `/etc`, the authz-guarded `docker.sock` for Ryuk) stay allowed.
+- **Bind sources are an ALLOWLIST** (findings #3 + round-4 #2): the sidecar is
+  `--privileged`, so its `/proc`, `/sys`, `/dev` are the HOST's *writable* kernel
+  interfaces (`-v /proc/sys:/x; echo … > /x/kernel/core_pattern` → host root,
+  verified live), and its *own* writable dirs (`/tmp`, `/etc`, …) are symlink-plant
+  ground: a nested container can `ln -s /proc /tmp/x` then `-v /tmp/x:/y` and
+  dockerd follows the symlink on the sidecar fs to host `/proc` (verified live). A
+  denylist can't cover that, so bind (and `local`-volume `device`) sources are
+  permitted ONLY if they are a named volume/relative, the authz-guarded
+  `docker.sock` (Ryuk / docker-outside-of-docker), or under a **`safeRoots`** entry
+  — the nosymfollow'd shared mounts (workspace + folder mappings, passed from the
+  gateway to the plugin). Everything else — including the sidecar's own dirs — is
+  refused. Checked in `Binds`, `Mounts[].source`, `Mounts` `DriverConfig.device`,
+  and at `POST /volumes/create` (a `local` device bind is set at volume-create then
+  referenced by name — round-3 finding #1, verified live).
 - **Swarm services are refused** (`POST /services/create` / `/services/{id}/update`
   — round-3 finding #2): their `ContainerSpec` is a second container/mount factory
   that never reaches the container-create guard. Swarm-in-DinD is unsupported.
+- **Managed-plugin install is refused** (`POST /plugins/create|pull|{name}/enable|
+  set|upgrade|push` — round-4 finding #1): `docker plugin install` POSTs a LOCAL
+  tar (no egress, no operator prompt) whose `config.json` can request host bind
+  mounts / caps / all-devices; the plugin then runs as root on the privileged
+  sidecar — a full escape that never touches the container-create guard.
 - On `POST /containers/{id}/exec` it runs `validateExecEscape` (privileged/CapAdd
   exec — finding #7). The request path is normalized (version prefix, `//`,
   percent-encoding) before matching so a crafted create path can't dodge
   inspection (finding #6).
+
+### Reduced bind surface (compat note)
+The allowlist means a nested container can bind ONLY: paths under the workspace /
+folder-mappings, named volumes, and the docker socket. It can no longer bind
+arbitrary sidecar paths (`/etc`, `/tmp`, …). This is a deliberate restriction —
+those dirs are on the privileged sidecar and are symlink-plant ground. Real
+workflows (compose `./path`, Testcontainers Ryuk, named volumes) are unaffected.
 
 ### Lower-priority residuals (not host-root escapes)
 - `POST /containers/{id}/update` is not inspected — it can only re-apply cgroup
@@ -84,8 +101,6 @@ there is no second, unfiltered path to reach.
 - `POST /build` with BuildKit `--allow security.insecure` would need the daemon to
   grant insecure entitlements; the sidecar dockerd does not (`--allow-insecure-
   entitlement` is unset), so insecure build steps are refused by dockerd itself.
-- Installing docker **plugins** (`/plugins/pull`+`enable`) is not inspected; it
-  requires egress (allowlisted) and is an unusual surface — flagged for future work.
 
 ### The symlink variant (also closed)
 The host-kernel-bind deny above is by lexical source path, so a devcontainer with a

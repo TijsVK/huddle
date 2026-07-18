@@ -51,7 +51,7 @@ assert_contains "$out" "RUN_OK" "$NAME: non-privileged nested container runs" ||
 
 # 7. Host-kernel bind is refused, direct AND via a workspace symlink (finding #3).
 out=$(dcsh "$NAME" 'docker run --rm -v /proc/sys:/ps alpine:3.20 true 2>&1' | tr -d "\r")
-assert_contains "$out" "host kernel path" "$NAME: direct /proc/sys bind refused" || rc=1
+assert_contains "$out" "not permitted" "$NAME: direct /proc/sys bind refused" || rc=1
 # Plant a symlink in the shared /work pointing at /proc/sys, then try to bind it.
 # nosymfollow on the sidecar's /work must make dockerd refuse to resolve it.
 dcsh "$NAME" 'docker run --rm -v /work:/w alpine:3.20 ln -sf /proc/sys /w/ev 2>/dev/null' >/dev/null 2>&1
