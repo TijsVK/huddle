@@ -112,6 +112,19 @@ fixes become moot). Also closed review findings #3 (MaskedPaths/ReadonlyPaths
 unmask), #7 (privileged exec), #8 (non-default seccomp/apparmor), plus the earlier
 #2 (MITM safeRequestPath) and the audit_log row cap.
 
+A SECOND adversarial review (of the authz plugin) found + fixed 4 more real
+escapes, all verified live: #1 case-insensitive JSON keys (`{"hostconfig":
+{"privileged":true}}` bypassed the case-sensitive plugin while dockerd applied it —
+now deep-lowercase all keys); #2 plugin-socket swap (a nested `-v /run/docker/
+plugins` could replace the authz socket with an allow-all one — plugin dir now
+mounted READ-ONLY into the sidecar); #3 host-kernel bind (privileged sidecar's
+/proc,/sys are the HOST's — `-v /proc/sys` wrote the host core_pattern → root; now
+deny binds of /proc,/sys,/dev,/); #4 partial MaskedPaths unmask (require a superset
+of runc defaults). Residual: the #3 deny is lexical, so a workspace-symlink variant
+remains (documented in SECURITY-CRITICAL.md — needs nosymfollow workspace or
+dropping host binds). Full harness battery GREEN (23/23 tools) + all 10 e2e GREEN
+under authz; 256 unit tests.
+
 Cost/limitation: `--privileged`-needing tools (kind, k3d, helm-on-k3d, dind-in-dind)
 are refused in DinD mode; their harness scripts assert that limitation. The compat
 harness (`lib.sh`) runs the SHIPPED plugin via `authz-runner.mjs`, so every tool is
