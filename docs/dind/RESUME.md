@@ -11,13 +11,12 @@ Resume the autonomous DinD build on branch experiment/dind: read docs/dind/PROGR
 - Branch `experiment/dind` → pushed to **`fork` = github.com/TijsVK/huddle** (personal). `origin` = infosupport upstream — never push there. gh active account must be **TijsVK** (`gh auth switch --user TijsVK` before any push).
 - An hourly cron (job `7 * * * *`) re-checks for work (session-only; the background-job runtime resumes after usage-limit resets).
 
-### ⭐ Latest: finding C1 (privileged host escape) MITIGATED + fully validated
-- **The escape is closed.** Per-devcontainer host-escape filter (`gateway/src/dind-filter.ts`): sidecar dockerd on `inner.sock`, gateway serves the filtered `docker.sock`, devcontainer `DOCKER_HOST` → filter. Pure policy in `host-config-policy.ts` (`validateDindEscape`). Streaming HTTP/1.1 proxy that inspects every `/containers/create` and confirms hijacks from the RESPONSE (101/raw-stream) before raw-tunnelling — a create can never reach the daemon uninspected. See `SECURITY-CRITICAL.md`.
-- **3 filter bugs found by MANUAL probing + fixed** (red→green): exec output dropped w/o `allowHalfOpen`; blanket bind-denial broke compose/testcontainers (DinD binds resolve against the disposable sidecar fs — only socket-dir binds refused); BuildKit `/grpc` h2c upgrade misparsed. Binding the *filter* socket is allowed (Testcontainers Ryuk) and stays filtered.
-- **Cost:** `--privileged`-needing tools (kind/k3d/helm-on-k3d/dind-in-dind) refused in DinD mode — their harness scripts now assert that limitation.
-- **The compat harness now runs the REAL filter** (`lib.sh` + `filter-runner.mjs`), not raw dockerd — faithful to the product.
-- **Fully green through the filter:** 20/20 harness tools; all 10 e2e (escape, aspire-sqlserver, delete-cleanup, restart, migrate, upgrade, restart-devcontainer, grpc-noproxy, nested-egress, toolchain-ca); **245 unit tests**.
-- Also hardened: MITM upstream `safeRequestPath` (finding #2); `audit_log` row-cap (200k).
+### ⭐ Latest: finding C1 (privileged host escape) MITIGATED via a dockerd AUTHZ PLUGIN
+- **The escape is closed by a dockerd authorization plugin**, NOT a socket proxy. Sidecar dockerd runs `--authorization-plugin=huddle-authz` (`gateway/src/dind-authz.ts`); the gateway serves the plugin socket at `<sockdir>/plugin/huddle-authz.sock` (mounted into the sidecar at `/run/docker/plugins`). dockerd listens on `docker.sock` (mounted into the devcontainer). No `inner.sock`. Policy in `host-config-policy.ts` (`validateDindEscape`/`validateExecEscape`). See `SECURITY-CRITICAL.md`.
+- **Why the pivot:** adversarial review found the earlier socket-proxy filter (`dind-filter.ts`, now deleted) bypassable — (1) devcontainer could hit the co-mounted raw `inner.sock`; (2) a workspace symlink bind reached the socket dir (dockerd follows symlink bind sources; lexical guard can't stop it). Both verified live. Authz removes the unfiltered socket entirely.
+- **Closes findings #1/#2 (bypass), #3 (MaskedPaths/ReadonlyPaths unmask), #6 (path-norm), #7 (privileged exec), #8 (non-default seccomp/apparmor).** Under authz all binds are safe (docker.sock is authz-guarded) → Ryuk / docker-outside-of-docker work.
+- **Cost:** `--privileged`-needing tools (kind/k3d/helm-on-k3d/dind-in-dind) refused in DinD mode — harness scripts assert that limitation. If the gateway is down, dockerd fails closed until the plugin reconnects (re-established on gateway restart before the sidecar (re)starts).
+- **Harness runs the REAL plugin** (`lib.sh` + `authz-runner.mjs`). Escape e2e GREEN; 239 unit tests green (`dind-authz.test.ts`). Aspire/other e2e re-validation under authz in progress.
 
 ## What's done
 - **Design N** (per-devcontainer private Docker daemon; sidecar shares the devcontainer netns), gated by `HUDDLE_DIND=1`. Classic model still default; **245 unit tests green** (incl. the `dind-filter` suite).
