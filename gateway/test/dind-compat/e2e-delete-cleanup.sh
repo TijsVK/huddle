@@ -7,7 +7,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; REPO="$(cd "$HERE/../../.." && pwd)"
 PORT=3991; DC=e2e-del; rc=0
 pass(){ printf 'PASS %s\n' "$*"; }; fail(){ printf 'FAIL %s\n' "$*"; }; log(){ printf '\033[36m[e2e]\033[0m %s\n' "$*" >&2; }
-cleanup(){ docker rm -f "$DC" "dind-$DC" huddle >/dev/null 2>&1||true; docker volume rm huddle-data "huddle-dind-sock-$DC" "huddle-dind-data-$DC" >/dev/null 2>&1||true; docker network rm "dc-net-$DC" >/dev/null 2>&1||true; }
+cleanup(){ docker rm -f "$DC" "dind-$DC" huddle >/dev/null 2>&1||true; docker volume rm huddle-data "huddle-dind-data-$DC" >/dev/null 2>&1||true; docker network rm "dc-net-$DC" >/dev/null 2>&1||true; rm -rf /tmp/dc-sockets/"$DC" 2>/dev/null||true; }
 trap cleanup EXIT
 cleanup
 
@@ -26,7 +26,9 @@ exists_v(){ docker volume inspect "$1" >/dev/null 2>&1; }
 exists_n(){ docker network inspect "$1" >/dev/null 2>&1; }
 
 exists_c "$DC" && exists_c "dind-$DC" && pass "devcontainer + sidecar exist before delete" || { fail "setup missing"; rc=1; }
-exists_v "huddle-dind-sock-$DC" && exists_v "huddle-dind-data-$DC" && pass "dind volumes exist before delete" || { fail "dind volumes missing"; rc=1; }
+# Socket topology is a host bind DIR (/tmp/dc-sockets/<name>) holding docker.sock
+# (filter) + inner.sock (sidecar dockerd), plus the data volume.
+[ -S "/tmp/dc-sockets/$DC/docker.sock" ] && exists_v "huddle-dind-data-$DC" && pass "dind sock dir + data volume exist before delete" || { fail "dind sock dir / data volume missing"; rc=1; }
 
 log "DELETE /api/docker/containers/$DC"
 resp=$(curl -s -H "$AUTH" -X DELETE "$API/api/docker/containers/$DC")
@@ -35,7 +37,7 @@ sleep 3
 
 exists_c "$DC" && { fail "LEAK: devcontainer still exists"; rc=1; } || pass "devcontainer removed"
 exists_c "dind-$DC" && { fail "LEAK: sidecar still exists"; rc=1; } || pass "sidecar removed"
-exists_v "huddle-dind-sock-$DC" && { fail "LEAK: sock volume remains"; rc=1; } || pass "sock volume removed"
+[ -e "/tmp/dc-sockets/$DC" ] && { fail "LEAK: sock dir remains"; rc=1; } || pass "sock dir removed"
 exists_v "huddle-dind-data-$DC" && { fail "LEAK: data volume remains"; rc=1; } || pass "data volume removed"
 exists_n "dc-net-$DC" && { fail "LEAK: dc-net remains"; rc=1; } || pass "dc-net removed"
 
