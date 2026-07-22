@@ -31,6 +31,31 @@ import { createDindAuthz, removeDindAuthz } from './dind-authz';
 
 const DIND_IMAGE = process.env.HUDDLE_DIND_IMAGE ?? 'docker:28-dind';
 
+// ── Rootless mode (experiment/dind-rootless) ─────────────────────────────────
+// When HUDDLE_DIND_ROOTLESS=1 the sidecar runs `docker:*-dind-rootless` WITHOUT
+// --privileged: dockerd runs as an unprivileged user inside a userns via
+// rootlesskit, so the SIDECAR ITSELF is the isolation boundary. A nested
+// container — even `--privileged` — cannot reach the host (verified: mount host
+// disk denied, no host devices, host sysctl write denied, breakout maps to an
+// unprivileged VM uid). That removes the need to police the Docker API, so the
+// authz/HostConfig control surface is skipped (allow-all). The egress firewall is
+// unaffected: dc-net is still `Internal`, host-enforced. See docs/dind/SPIKE-rootless.md.
+export const DIND_ROOTLESS = process.env.HUDDLE_DIND_ROOTLESS === '1';
+const DIND_IMAGE_ROOTLESS = process.env.HUDDLE_DIND_IMAGE_ROOTLESS ?? 'docker:28-dind-rootless';
+const DIND_ACTIVE_IMAGE = DIND_ROOTLESS ? DIND_IMAGE_ROOTLESS : DIND_IMAGE;
+// rootlesskit copy-up's /etc and /run, so a socket under /run would be shadowed.
+// Put the shared socket + CA dir OUTSIDE those paths.
+const DIND_RL_RUN = '/huddle-run';
+const DIND_RL_SOCKET = `${DIND_RL_RUN}/docker.sock`;
+const DIND_RL_CERT_MOUNT = '/huddle-certs';
+const DIND_RL_DATA_TARGET = '/home/rootless/.local/share/docker';
+// Host dir (gateway-visible) holding the huddle CA, bind-mounted ro into the
+// rootless sidecar; dockerd trusts it via SSL_CERT_DIR (no trust-store write,
+// which uid 1000 can't do). Reuses the per-container socket tree.
+export function dindCertDir(containerName: string): string {
+  return `${dindSockDir(containerName)}/certs`;
+}
+
 // Socket topology (C1 mitigation via a dockerd AUTHORIZATION PLUGIN — dind-authz.ts).
 // The sidecar dockerd runs with `--authorization-plugin=huddle-authz` and listens
 // on its OWN real socket `docker.sock`; the gateway serves the authz plugin socket
@@ -158,9 +183,13 @@ export async function createDindSidecar(
   // Bestaande sidecar opruimen (herstart-scenario / re-create).
   try { await dockerRequest('DELETE', `/containers/${encodeURIComponent(name)}?force=true`); } catch {}
 
-  await ensureImage(DIND_IMAGE);
+  await ensureImage(DIND_ACTIVE_IMAGE);
   await ensureDindSockVolume(containerName);
   await ensureVolume(dindDataVolume(containerName), containerName);
+
+  if (DIND_ROOTLESS) {
+    return await createRootlessSidecar(containerName, devcontainerId, sharedMounts);
+  }
 
   // dockerd luistert op de unix-socket in de gedeelde volume. TLS uit
   // (DOCKER_TLS_CERTDIR leeg): het pad loopt over een unix-socket in een
@@ -287,6 +316,96 @@ export async function createDindSidecar(
   return id;
 }
 
+// Rootless sidecar (HUDDLE_DIND_ROOTLESS=1): non-privileged, allow-all, no authz.
+// The sidecar's userns is the isolation boundary. See docs/dind/SPIKE-rootless.md.
+async function createRootlessSidecar(
+  containerName: string,
+  devcontainerId: string,
+  sharedMounts: SidecarMount[],
+): Promise<string> {
+  const name = dindContainerName(containerName);
+
+  // dockerd (uid 1000) can't write the system trust store, so expose the huddle
+  // MITM CA via SSL_CERT_DIR instead: write it to a gateway-visible dir and
+  // bind-mount it ro. Go's cert pool ADDS SSL_CERT_DIR entries to the system set,
+  // so dockerd's own registry pulls through the proxy validate.
+  const certDir = dindCertDir(containerName);
+  try { fs.mkdirSync(certDir, { recursive: true, mode: 0o777 }); } catch {}
+  fs.writeFileSync(`${certDir}/huddle-ca.crt`, getCaCertPem());
+  try { fs.chmodSync(`${certDir}/huddle-ca.crt`, 0o644); } catch {}
+
+  // First arg 'dockerd' (no leading '-') makes dockerd-entrypoint.sh SKIP its
+  // default-args block — avoiding the forced `tcp://0.0.0.0:2375` listener — and
+  // run exactly these flags. No `--authorization-plugin`: rootless is the
+  // boundary, so Docker ops are allow-all. The entrypoint still wraps dockerd in
+  // rootlesskit + docker-init + iptables setup.
+  const cmd = ['dockerd', `--host=unix://${DIND_RL_SOCKET}`, '--mtu=1400'];
+
+  const createBody = {
+    Image: DIND_IMAGE_ROOTLESS,
+    Cmd: cmd,
+    Env: [
+      'DOCKER_TLS_CERTDIR=',
+      `SSL_CERT_DIR=/etc/ssl/certs:${DIND_RL_CERT_MOUNT}`,
+      'HTTP_PROXY=http://huddle:80',
+      'HTTPS_PROXY=http://huddle:80',
+      'http_proxy=http://huddle:80',
+      'https_proxy=http://huddle:80',
+      'NO_PROXY=localhost,127.0.0.1,::1,[::1],huddle,host.docker.internal',
+      'no_proxy=localhost,127.0.0.1,::1,[::1],huddle,host.docker.internal',
+    ],
+    Labels: { 'huddle.parent': containerName, 'huddle.role': 'dind' },
+    HostConfig: {
+      // Deel de netns van de devcontainer: gepubliceerde poorten landen op diens
+      // loopback (Aspire DCP), egress erft diens firewall (dc-net is Internal).
+      NetworkMode: `container:${devcontainerId}`,
+      // NIET privileged. Leeg MaskedPaths/ReadonlyPaths = het API-equivalent van
+      // de CLI `--security-opt systempaths=unconfined`: unmaskt /proc zodat dockerd
+      // de net-sysctls voor geneste bridge-netwerken kan schrijven. seccomp/apparmor
+      // uit voor de geneste runtime. De userns bevat een uitbraak hoe dan ook.
+      SecurityOpt: ['seccomp=unconfined', 'apparmor=unconfined'],
+      MaskedPaths: [],
+      ReadonlyPaths: [],
+      Devices: [
+        { PathOnHost: '/dev/fuse', PathInContainer: '/dev/fuse', CgroupPermissions: 'rwm' },
+        { PathOnHost: '/dev/net/tun', PathInContainer: '/dev/net/tun', CgroupPermissions: 'rwm' },
+      ],
+      Mounts: [
+        // Socket buiten /run (rootlesskit copy-up't /run); dezelfde host-dir die
+        // de devcontainer op /var/run/dind mount → gedeelde socket.
+        { Type: 'bind', Source: dindOuterDir(containerName), Target: DIND_RL_RUN },
+        { Type: 'bind', Source: certDir, Target: DIND_RL_CERT_MOUNT, ReadOnly: true },
+        // Rootless bewaart data onder ~/.local/share/docker, niet /var/lib/docker.
+        { Type: 'volume', Source: dindDataVolume(containerName), Target: DIND_RL_DATA_TARGET },
+        ...sharedMounts,
+      ],
+      RestartPolicy: { Name: 'unless-stopped' },
+    },
+  };
+
+  const created = await dockerRequest('POST', `/containers/create?name=${encodeURIComponent(name)}`, createBody);
+  const id: string = created.Id;
+  await dockerRequest('POST', `/containers/${id}/start`, {});
+  chmodRootlessSocketWhenReady(containerName);
+  console.log(`[dind] rootless sidecar ${name} started (netns of ${containerName}), allow-all (no authz)`);
+  return id;
+}
+
+// rootless dockerd creates its socket 0660 owned by uid 1000; the devcontainer
+// user may differ. The gateway sees the socket on the host bind (outer dir) —
+// chmod it 0666 once it appears. A short loop also covers a dockerd restart
+// re-creating the socket. (root gateway can chmod a uid-1000-owned file.)
+function chmodRootlessSocketWhenReady(containerName: string): void {
+  const sock = `${dindOuterDir(containerName)}/docker.sock`;
+  let ticks = 0;
+  const timer = setInterval(() => {
+    ticks++;
+    try { if (fs.existsSync(sock)) fs.chmodSync(sock, 0o666); } catch {}
+    if (ticks > 150) clearInterval(timer);
+  }, 2000);
+  timer.unref?.();
+}
+
 // Sidecar + zijn volumes verwijderen wanneer de devcontainer wordt opgeruimd.
 export async function removeDindSidecar(containerName: string): Promise<void> {
   const name = dindContainerName(containerName);
@@ -326,12 +445,16 @@ export async function ensureDindSidecar(containerName: string, devcontainerId: s
     // until we re-establish it. Re-create the authz plugin BEFORE (re)starting so
     // the socket is present when dockerd reconnects. safeRoots (bind allowlist) are
     // derived from the devcontainer's shared mounts, same as createDindSidecar.
-    const restoreRoots = (await sharedMountsFromDevcontainer(devcontainerId)).map(m => m.Target);
-    await createDindAuthz(containerName, dindPluginSockPath(containerName), restoreRoots);
+    if (!DIND_ROOTLESS) {
+      const restoreRoots = (await sharedMountsFromDevcontainer(devcontainerId)).map(m => m.Target);
+      await createDindAuthz(containerName, dindPluginSockPath(containerName), restoreRoots);
+    }
     if (!info?.State?.Running) {
       await dockerRequest('POST', `/containers/${encodeURIComponent(name)}/start`, {});
       console.log(`[dind] sidecar ${name} restarted`);
     }
+    // The socket-chmod loop lives in the (now-restarted) gateway process; re-arm it.
+    if (DIND_ROOTLESS) chmodRootlessSocketWhenReady(containerName);
   } catch {
     const shared = await sharedMountsFromDevcontainer(devcontainerId);
     await createDindSidecar(containerName, devcontainerId, shared);

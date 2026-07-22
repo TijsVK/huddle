@@ -129,9 +129,18 @@ export async function runInit(opts: InitOptions, images: ResolvedImages): Promis
   if (dindEnabled) {
     dindFlags += ' -e HUDDLE_DIND=1';
     if (process.env.HUDDLE_DIND_IMAGE) dindFlags += ` -e HUDDLE_DIND_IMAGE=${process.env.HUDDLE_DIND_IMAGE}`;
-    console.log(yellow('Docker-in-Docker mode active (HUDDLE_DIND=1): each devcontainer gets a private Docker daemon.'));
+    // Rootless DinD (experiment/dind-rootless): non-privileged sidecar as the
+    // isolation boundary → allow-all Docker ops, no authz control surface.
+    const rootless = process.env.HUDDLE_DIND_ROOTLESS === '1';
+    if (rootless) {
+      dindFlags += ' -e HUDDLE_DIND_ROOTLESS=1';
+      if (process.env.HUDDLE_DIND_IMAGE_ROOTLESS) dindFlags += ` -e HUDDLE_DIND_IMAGE_ROOTLESS=${process.env.HUDDLE_DIND_IMAGE_ROOTLESS}`;
+    }
+    console.log(yellow(`Docker-in-Docker mode active (HUDDLE_DIND=1${rootless ? ', ROOTLESS' : ''}): each devcontainer gets a private Docker daemon.`));
     if (process.env.HUDDLE_NO_PULL !== '1') {
-      const dindImage = process.env.HUDDLE_DIND_IMAGE ?? 'docker:28-dind';
+      const dindImage = rootless
+        ? (process.env.HUDDLE_DIND_IMAGE_ROOTLESS ?? 'docker:28-dind-rootless')
+        : (process.env.HUDDLE_DIND_IMAGE ?? 'docker:28-dind');
       console.log(dim(`Pulling DinD engine image ${dindImage}`));
       try { run(`${rt} pull ${dindImage}`); } catch { console.log(yellow(`[!] Could not pull ${dindImage} — the gateway will pull it on first devcontainer start.`)); }
     }
