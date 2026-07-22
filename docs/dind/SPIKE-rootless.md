@@ -64,6 +64,38 @@ Ran `docker:28-dind-rootless` as a **non-privileged** container:
   hit the userns-owned netns; /proc/kcore needs real caps), but note the reduced
   hardening.
 
+## BUILT + validated (2026-07-22, round 3)
+
+Wired into the gateway behind `HUDDLE_DIND_ROOTLESS=1` (`dind.ts`
+`createRootlessSidecar`, `cli/init.ts` env passthrough). Validated live through
+the REAL gateway:
+- sidecar `docker:28-dind-rootless`, **privileged=false**, MaskedPaths/
+  ReadonlyPaths emptied (API form of `systempaths=unconfined`).
+- devcontainer → rootless dockerd OK; **dockerd pulls through the MITM proxy**
+  (CA via `SSL_CERT_DIR`, no trust-store write).
+- nested published port → 200 from the devcontainer loopback (Aspire model +
+  docker0/br+ egress fix).
+- nested `--privileged` runs (allow-all) yet host mount DENIED / no host disk
+  (contained; breakout = unprivileged uid).
+- **Full Aspire project→SqlServer E2E GREEN** (`e2e-aspire-project-ef.sh` with
+  `HUDDLE_DIND_ROOTLESS=1`): build via proxy, EF DB round-trip `count:1`,
+  dashboard http, no gRPC UntrustedRoot. All 7 assertions pass.
+
+API gotcha: `--security-opt systempaths=unconfined` is CLI sugar — the Docker
+API needs `HostConfig.MaskedPaths=[]` + `ReadonlyPaths=[]` (a `systempaths=...`
+SecurityOpt entry is rejected 500).
+
+### Follow-ups before this replaces the privileged model
+- Real dashboard validation (Blazor circuit / resource-service gRPC at runtime,
+  not log-greps) — user reports the dashboard "does not work"; needs their exact
+  error. e2e only greps logs today.
+- Per-sidecar distinct host uid for airtight inter-devcontainer isolation (all
+  rootless sidecars share host uid 1000 → a breakout could ptrace a peer
+  sidecar). Still strictly better than privileged=host-root.
+- No cgroup delegation → no nested resource limits (minor).
+- Delete `dind-authz.ts` / `host-config-policy.ts` / socket-proxy HostConfig path
+  once rootless graduates from experiment to default.
+
 ## Verdict — GREEN to build
 
 Rootless-dind delivers the security shape we want (non-privileged sidecar,
