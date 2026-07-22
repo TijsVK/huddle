@@ -359,11 +359,18 @@ async function createRootlessSidecar(
       // Deel de netns van de devcontainer: gepubliceerde poorten landen op diens
       // loopback (Aspire DCP), egress erft diens firewall (dc-net is Internal).
       NetworkMode: `container:${devcontainerId}`,
-      // NIET privileged. Leeg MaskedPaths/ReadonlyPaths = het API-equivalent van
-      // de CLI `--security-opt systempaths=unconfined`: unmaskt /proc zodat dockerd
-      // de net-sysctls voor geneste bridge-netwerken kan schrijven. seccomp/apparmor
-      // uit voor de geneste runtime. De userns bevat een uitbraak hoe dan ook.
-      SecurityOpt: ['seccomp=unconfined', 'apparmor=unconfined'],
+      // NIET privileged. Minimale versoepeling (getest):
+      //  - seccomp=unconfined: VEREIST — het default seccomp-profiel blokkeert de
+      //    fork/exec + userns-syscalls die rootlesskit nodig heeft.
+      //  - apparmor NIET versoepeld: het default profiel werkt (geen uitbraak-
+      //    oppervlak onnodig vergroten; op WSL2 is apparmor sowieso afwezig).
+      //  - Leeg MaskedPaths/ReadonlyPaths = API-equivalent van CLI `systempaths=
+      //    unconfined`: unmaskt /proc zodat dockerd de net-sysctls voor geneste
+      //    bridge-netwerken kan schrijven.
+      // Een uitbraak wordt door de userns hoe dan ook tot een unprivileged uid
+      // beperkt; dit houdt het uitbraak-oppervlak van de sidecar-container zelf
+      // zo klein mogelijk.
+      SecurityOpt: ['seccomp=unconfined'],
       MaskedPaths: [],
       ReadonlyPaths: [],
       Devices: [

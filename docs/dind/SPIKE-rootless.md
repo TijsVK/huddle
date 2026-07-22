@@ -92,6 +92,21 @@ SecurityOpt entry is rejected 500).
 - Per-sidecar distinct host uid for airtight inter-devcontainer isolation (all
   rootless sidecars share host uid 1000 → a breakout could ptrace a peer
   sidecar). Still strictly better than privileged=host-root.
+  **Investigated 2026-07-22 — DEFERRED (multi-hurdle).** Docker has NO native
+  per-container userns (Podman's `--userns=auto` does; Docker doesn't). Running
+  the rootless image as a distinct uid needs, per devcontainer: a non-overlapping
+  `/etc/subuid`+`/etc/subgid` range, writable HOME + `XDG_RUNTIME_DIR`, `USER`
+  env, AND an `/etc/passwd` entry (newuidmap resolves the uid by name — fails
+  with "Cannot determine your user name" otherwise), plus range lifecycle mgmt.
+  Too fragile to rush; scoped as its own change. Mitigations shipped instead:
+  (a) reaching the shared uid needs a full sidecar-CONTAINER escape first (two
+  escapes, not one — rootless already contains the first); (b) SecurityOpt
+  minimized to shrink that escape surface.
+- **SecurityOpt minimized (DONE).** Tested each relaxation: `seccomp=unconfined`
+  is REQUIRED (default seccomp blocks rootlesskit's fork/exec + userns syscalls);
+  `apparmor=unconfined` is NOT (daemon + nested networking work at default;
+  WSL2 has no apparmor). Sidecar now uses `SecurityOpt:['seccomp=unconfined']`
+  + empty MaskedPaths/ReadonlyPaths only.
 - No cgroup delegation → no nested resource limits (minor).
 - Delete `dind-authz.ts` / `host-config-policy.ts` / socket-proxy HostConfig path
   once rootless graduates from experiment to default.
