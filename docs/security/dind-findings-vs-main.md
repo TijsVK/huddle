@@ -80,6 +80,12 @@ A full end-to-end PoC — running gateway + devcontainer + host dockerd, sending
 device from the spawned container — was **not** executed here (needs the full
 runtime). Findings #1 and #2 warrant that live confirmation before disclosure.
 
+A ready-to-run PoC for finding #1 lives at `docs/security/poc-host-escape.sh`: run
+it inside a Huddle devcontainer against your own instance. It creates a
+`privileged` + host-PID + host-rootfs container via the lowercase-`hostconfig`
+bypass, `nsenter`s into host init, pops a calculator, and drops a proof file on the
+host. Harmless payload, self-cleaning; exits 2 if the proxy refuses (patched).
+
 ## Recommended fixes (port from `experiment/dind`)
 
 1. Deep-lowercase HostConfig keys before validation (`lowerKeysDeep`) **and** read
