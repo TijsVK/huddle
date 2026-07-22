@@ -34,42 +34,56 @@ Ran `docker:28-dind-rootless` as a **non-privileged** container:
 - **Shared netns.** `--network container:<other>` — rootless dockerd still
   initializes inside a joined netns (didn't reject it).
 
-### Blockers ❌ / open ⚠️
-- **❌ Nested bridge networking fails on WSL2.** rootlesskit's userns netns has
-  **read-only** `/proc/sys/net/ipv6/*`. dockerd fails both paths:
-  - v4-only network → `failed to disable IPv6 on container's interface eth0`
-  - v6 network → `failed to set IP forwarding .../ipv6/conf/default/forwarding: read-only file system`
-  ipv6 is enabled+writable on the WSL2 *host*; the restriction is specific to the
-  rootless userns netns (known rootless limitation). Outer `--sysctl
-  net.ipv6.conf.all.disable_ipv6=1` did not help; `--network none` works but is
-  useless for real workloads. **This blocks Aspire/compose/testcontainers** and
-  must be solved before rootless is viable. Fixes are non-trivial (dockerd can't
-  currently skip the ipv6 sysctl write; needs a rootlesskit/kernel or upstream
-  change).
-- **⚠️ Shared-netns published-ports-on-localhost — UNVALIDATED.** Aspire needs a
-  nested container's published port to land on the devcontainer's `localhost`
-  (current privileged design gets this via shared netns). Rootless-dind normally
-  inserts a rootlesskit/slirp port-driver layer; how published ports surface in a
-  *joined* netns is untested (blocked behind the ipv6 issue). This is the second
-  hard integration question.
-- **⚠️ No cgroup delegation** → no CPU/memory limits on nested containers
+### Both hard blockers SOLVED (2026-07-22, round 2)
+- **✅ Nested networking — fixed with `--security-opt systempaths=unconfined`.**
+  Root cause was NOT ipv6 per se: `/proc/sys` is mounted **read-only** in the
+  non-privileged sidecar (runc default masking), so dockerd can't write ANY net
+  sysctl (the ipv6 disable/forwarding just happened to be first). `systempaths=
+  unconfined` unmasks `/proc` without going privileged → nested bridge
+  networking works: `BRIDGE-OK` 172.17.0.2, egress ok, nested `--privileged` ok.
+- **✅ Shared-netns published-ports-on-localhost — WORKS.** rootless sidecar with
+  `--network container:<devcontainer>`: an inner `nginx -p 8080:80` is reachable
+  as `curl localhost:8080 → 200` from the devcontainer's netns, listening on the
+  shared netns. rootlesskit did not hide it behind its own netns. This is exactly
+  the Aspire DCP model — the make-or-break test, passed.
+- **✅ Breakout containment holds even with `systempaths=unconfined`.** Nested
+  `--privileged`: mount host disk DENIED, no host block devices, host sysctl
+  write denied, sees only its own PIDs. Sidecar dockerd runs as host **uid 1000,
+  not root** — a breakout lands unprivileged (vs host-root today).
+
+### Remaining ⚠️
+- **Per-sidecar uid for solid inter-devcontainer isolation.** All rootless
+  sidecars run as the SAME host uid (1000). A breakout to uid 1000 could
+  ptrace/signal a *peer* devcontainer's sidecar (same uid, VM init pidns). Fix:
+  give each sidecar a distinct host uid (per-devcontainer uid, or host
+  userns-remap). Still strictly better than the current privileged model
+  (breakout = host root). Needs design.
+- **No cgroup delegation** → no CPU/memory limits on nested containers
   (`Cgroup Driver: none`; needs systemd-in-sidecar). Minor.
+- **`systempaths=unconfined` unmasks /proc** — acceptable under a userns (writes
+  hit the userns-owned netns; /proc/kcore needs real caps), but note the reduced
+  hardening.
 
-## Verdict
+## Verdict — GREEN to build
 
-Rootless-dind delivers exactly the security shape we want (non-privileged
-sidecar, contained breakout, allow-all → delete the control surface). But it is
-**not a drop-in on WSL2**: nested networking is broken by the rootlesskit ipv6
-sysctl restriction, and the shared-netns published-port model — the thing Aspire
-depends on — is unproven and likely needs rework. Both are real engineering, not
-config flips.
+Rootless-dind delivers the security shape we want (non-privileged sidecar,
+contained breakout, allow-all → delete the control surface) AND both hard
+integration blockers (nested networking, shared-netns published ports) are
+solved on WSL2. Required sidecar flags: `--security-opt seccomp=unconfined
+--security-opt apparmor=unconfined --security-opt systempaths=unconfined
+--device /dev/fuse --device /dev/net/tun`, image `docker:<ver>-dind-rootless`,
+socket `/run/user/1000/docker.sock`.
 
-Options:
-1. **Invest**: solve the WSL2 rootless networking (ipv6 skip + port model),
-   validate Aspire/compose end-to-end, then delete the control surface. Medium
-   effort, some upstream-dependency risk.
-2. **Defer**: keep the validated `--privileged` + authz model (works today, full
-   E2E green) and revisit rootless when the networking work can be scheduled.
+Build plan: (1) wire a rootless sidecar variant into `dind.ts` behind
+`HUDDLE_DIND_ROOTLESS`; (2) run the Aspire + nested-published-port E2Es against
+it, incl. REAL dashboard validation (resource-service gRPC + Blazor circuit, not
+just log-greps); (3) with rootless proven, gate/remove the authz/HostConfig
+control surface (no longer the isolation boundary); (4) design per-sidecar uid
+for inter-devcontainer isolation.
+
+Egress firewall stays regardless: `dc-net-<name>` is `Internal: true`
+(`docker.ts:317`), host-enforced, untouchable from inside, unaffected by
+allow-all.
 
 The egress firewall is orthogonal and stays regardless: `dc-net-<name>` is
 `Internal: true` (`docker.ts:317`), so the devcontainer has no internet route
