@@ -501,7 +501,23 @@ ln -sfn ${sockPath} /var/run/docker.sock 2>/dev/null || true`;
 // iptables-regels). Leeg in klassieke modus.
 function dindClientProxyConfig(enabled: boolean): string {
   if (!enabled) return '';
-  return `# DinD: proxy-env voor geneste containers via docker-client-config.
+  return `# DinD: geneste containers hangen aan de dind-bridge (docker0 en user-defined
+# br-*). De egress-DROP (filter OUTPUT) en de port-80->proxy DNAT (nat OUTPUT)
+# vangen ZONDER uitzondering OOK het docker-proxy-verkeer naar die geneste
+# containers af: docker-proxy forwardt localhost:<pub> naar <container-ip>:<port>
+# via docker0, wat de DROP raakt (elke port) resp. de port-80-DNAT (poort 80/443,
+# geeft 502 via de proxy). Gevolg: GEEN published port van een geneste container
+# is vanuit de devcontainer bereikbaar (Aspire project->SqlServer, docker compose
+# ports, testcontainers-vanuit-host). Verkeer naar de bridge is interne
+# container-communicatie, geen echte egress; de eigen egress van een geneste
+# container loopt via de FORWARD-keten en blijft volledig afgedwongen (getest:
+# nested->internet = geblokkeerd/geproxyd). Insert boven de DROP/DNAT (-I .. 1),
+# idempotent via -C.
+for _brif in docker0 br+; do
+  iptables -C OUTPUT -o "$_brif" -j ACCEPT 2>/dev/null || iptables -I OUTPUT 1 -o "$_brif" -j ACCEPT 2>/dev/null || true
+  iptables -t nat -C OUTPUT -o "$_brif" -j RETURN 2>/dev/null || iptables -t nat -I OUTPUT 1 -o "$_brif" -j RETURN 2>/dev/null || true
+done
+# DinD: proxy-env voor geneste containers via docker-client-config.
 if [ -n "$HUDDLE_IP" ]; then
   for _h in /root /home/vscode; do
     mkdir -p "$_h/.docker"
