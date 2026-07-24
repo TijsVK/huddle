@@ -486,6 +486,28 @@ else
   ( while true; do _huddle_cred_guard; sleep 1; done ) &
 fi`;
 
+// De proxy- en CA-config leeft alleen als container-Env (zie de `env`-array bij
+// createContainer). Die env wordt geërfd door PID 1 en de default vscode-shell,
+// maar NIET door een login-shell van een andere user (`su - <user>` bouwt een
+// verse login-omgeving) of contexten die de env resetten. Zo'n shell heeft dan
+// geen proxy, en omdat het netwerk internal-only is (+ iptables DROP) valt apt
+// terug op directe DNS die faalt: "Temporary failure resolving 'deb.debian.org'".
+// Anker de proxy daarom óók system-wide, los van env-overerving:
+//   1. /etc/apt/apt.conf.d/99-huddle-proxy → apt gebruikt de proxy ALTIJD, ook
+//      onder `sudo apt` (env_reset) of een user zonder proxy-env.
+//   2. /etc/environment → door PAM gelezen voor ELKE login-sessie (incl. `su -`),
+//      zodat proxy- + CA-vars ook buiten de default vscode-shell aanwezig zijn.
+// De proxy-URL en NO_PROXY-lijst zijn identiek aan de container-Env (huddle:80).
+const PROXY_SYSTEM_WIDE = `# apt leest deze conf ongeacht de shell-env: proxy blijft werken onder \`sudo apt\`
+# (env_reset) en voor elke user, niet alleen de default vscode-login-shell.
+printf 'Acquire::http::Proxy "http://huddle:80";\\nAcquire::https::Proxy "http://huddle:80";\\n' > /etc/apt/apt.conf.d/99-huddle-proxy
+chmod 644 /etc/apt/apt.conf.d/99-huddle-proxy
+# /etc/environment wordt door PAM gelezen voor ELKE login-sessie (ook \`su - <user>\`),
+# zodat de proxy- + CA-vars niet verloren gaan buiten de default vscode-shell.
+for kv in 'http_proxy=http://huddle:80' 'https_proxy=http://huddle:80' 'HTTP_PROXY=http://huddle:80' 'HTTPS_PROXY=http://huddle:80' 'no_proxy=localhost,127.0.0.1,::1,[::1],host.docker.internal' 'NO_PROXY=localhost,127.0.0.1,::1,[::1],host.docker.internal' 'NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/huddle-ca.crt' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' 'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt'; do
+  grep -qxF "\$kv" /etc/environment 2>/dev/null || printf '%s\\n' "\$kv" >> /etc/environment
+done`;
+
 // ── jb-config.sh — same logic as devcontainer-manager.ps1 ───────────────────
 
 function buildJbConfigScript(containerWorkspace: string, containerName: string, ideName: IdeName, password: string, caCertPem: string, seedScript: string): string {
@@ -549,6 +571,8 @@ chmod 644 /usr/local/share/ca-certificates/huddle-ca.crt
 command -v update-ca-certificates >/dev/null 2>&1 && update-ca-certificates >/dev/null 2>&1 || true
 printf 'export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/huddle-ca.crt\\n' > /etc/profile.d/99-huddle-ca.sh
 chmod 644 /etc/profile.d/99-huddle-ca.sh
+
+${PROXY_SYSTEM_WIDE}
 
 ${IDE_CRED_SCRUB}
 
@@ -676,6 +700,8 @@ chmod 644 /usr/local/share/ca-certificates/huddle-ca.crt
 command -v update-ca-certificates >/dev/null 2>&1 && update-ca-certificates >/dev/null 2>&1 || true
 printf 'export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/huddle-ca.crt\\n' > /etc/profile.d/99-huddle-ca.sh
 chmod 644 /etc/profile.d/99-huddle-ca.sh
+
+${PROXY_SYSTEM_WIDE}
 
 ${IDE_CRED_SCRUB}
 
