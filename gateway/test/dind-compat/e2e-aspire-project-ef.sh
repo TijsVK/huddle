@@ -111,32 +111,27 @@ printf '%s' "$result" | grep -q 'hello-from-ef' \
 echo "$runlog" | grep -qE "Dashboard:  http://" && pass "dashboard on plain http (unsecured-transport inherited)" || { fail "dashboard not http"; rc=1; }
 echo "$runlog" | grep -qiE "UntrustedRoot|RpcException.*SSL" && { fail "dashboard gRPC UntrustedRoot present"; rc=1; } || pass "no dashboard gRPC UntrustedRoot / cert errors"
 
-# ── ACTUALLY exercise the dashboard (not just log-greps) ──────────────────────
-# The prior checks only prove the dashboard logged an http URL. They do NOT prove
-# the Blazor UI boots or the resource-service gRPC works — which is what a user
-# means by "the dashboard doesn't work". So: fetch the dashboard over its login
-# token, assert it serves the Blazor boot markup, then re-read the AppHost log for
-# ANY runtime circuit/gRPC failure (broader than UntrustedRoot).
-dashurl=$(echo "$runlog" | grep -oE 'Login to the dashboard at http://localhost:[0-9]+/login\?t=[a-f0-9]+' | head -1 | grep -oE 'http://localhost:[0-9]+/login\?t=[a-f0-9]+')
+# ── ACTUALLY exercise the dashboard IN A REAL BROWSER (not log-greps) ──────────
+# The greps above only prove the dashboard logged an http URL with no cert error.
+# They do NOT prove the Blazor UI renders the resources, which is what a user means
+# by "the dashboard works". Drive a headless Chromium (joined to this devcontainer's
+# netns) through the login token and assert the resource grid actually populates
+# over the live SignalR/gRPC circuit: sql + appdb + svc present, sql & svc Running.
+# A dead resource circuit leaves the grid empty and fails here — the real signal.
+source "$HERE/lib/dashboard.sh"
+dashurl=$(echo "$runlog" | grep -oE 'http://localhost:[0-9]+/login\?t=[a-f0-9]+' | head -1)
 if [ -n "$dashurl" ]; then
-  dashport=$(printf '%s' "$dashurl" | grep -oE 'localhost:[0-9]+' | cut -d: -f2)
-  # follow the login redirect to the app root; Blazor Server pages ship a
-  # blazor.web.js / _framework boot script + a data-reconnect-ui circuit marker.
-  html=$(docker exec -u vscode "$DC" bash -lc "curl -s -m10 -L --cookie-jar /tmp/dj --cookie /tmp/dj '$dashurl'" 2>/dev/null)
-  printf '%s' "$html" | grep -qiE '_framework/blazor|blazor\.web\.js|components-reconnect' \
-    && pass "dashboard Blazor UI boots (served circuit markup)" \
-    || { fail "dashboard did not serve Blazor markup (UI broken?)"; rc=1; log "--- dashboard html head ---"; printf '%s' "$html" | head -c 400 >&2; }
+  probe=$(assert_dashboard "$DC" "$dashurl" "sql,appdb,svc" "sql,svc" "$HERE/.artifacts/aspire-project-ef")
+  if [ $? -eq 0 ]; then
+    pass "dashboard renders the SqlServer resource in a real browser (grid populated)"
+    log "probe: $probe"; log "screenshot: $HERE/.artifacts/aspire-project-ef/dashboard.png"
+  else
+    fail "dashboard did NOT render resources in a real browser"; rc=1
+    log "probe: $probe"; log "screenshot: $HERE/.artifacts/aspire-project-ef/dashboard.png"
+  fi
 else
   fail "no dashboard login URL in AppHost log"; rc=1
 fi
-# Give the dashboard a moment to open its resource-service gRPC circuit, then scan
-# for ANY unhandled circuit/gRPC error at runtime (the real "dashboard broken"
-# signal), not only the cert case.
-sleep 8
-runlog2=$(docker exec -u vscode "$DC" cat /home/vscode/apphost/run.log 2>/dev/null)
-echo "$runlog2" | grep -qiE "CircuitHost.*(Unhandled|exception)|Grpc\.Core\.RpcException|Error starting gRPC call|unhandled exception on the current circuit" \
-  && { fail "dashboard runtime circuit/gRPC error present"; rc=1; log "--- circuit error ---"; echo "$runlog2" | grep -iE "CircuitHost|RpcException|gRPC call|current circuit" | tail -6 >&2; } \
-  || pass "no dashboard runtime circuit/gRPC errors"
 
-[ -z "$result" ] && { rc=1; log "--- AppHost log tail ---"; echo "$runlog2" | tail -30 >&2; }
+[ -z "$result" ] && { rc=1; log "--- AppHost log tail ---"; echo "$runlog" | tail -30 >&2; }
 exit $rc

@@ -1,0 +1,11 @@
+# Dashboard-parity probe image: the official Playwright image ships the browsers
+# (under /ms-playwright) but not the `playwright` npm package. Add it, matching the
+# image's bundled browser build, so `import 'playwright'` resolves offline at run
+# time. Build once: docker build -t huddle-dashboard-probe:latest -f Dockerfile.probe .
+FROM mcr.microsoft.com/playwright:v1.50.0-noble
+WORKDIR /probe
+RUN npm init -y >/dev/null 2>&1 && npm i playwright@1.50.0 >/dev/null 2>&1
+# The probe script is bind-mounted at run time into /probe so it can be iterated
+# without a rebuild; node resolves `playwright` from /probe/node_modules.
+ENTRYPOINT ["node"]
+CMD ["dashboard-probe.mjs"]
