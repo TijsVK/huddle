@@ -1,0 +1,10 @@
+{
+  "id": "sudo-grant",
+  "name": "Sudo Grant",
+  "version": "1.0.0",
+  "icon": "shield-check",
+  "settings": [
+    { "key": "sudoUser", "label": "Container user to elevate (default: vscode)" },
+    { "key": "maxMinutes", "label": "Maximum grant length in minutes (default: 120)" }
+  ]
+}

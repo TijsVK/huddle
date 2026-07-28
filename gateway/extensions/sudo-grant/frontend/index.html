@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sudo Grant</title>
+<style>
+  /* Standalone page (the portal's "Open" button). Inside the portal the same
+     component inherits these variables from the host SPA instead. */
+  :root {
+    --bg: #f3f4f8;
+    --surface: #ffffff;
+    --surface-2: #fafbfd;
+    --surface-hover: #f6f7fa;
+    --border: #e7e9ef;
+    --border-strong: #d8dbe4;
+    --text: #1d212e;
+    --text-muted: #6c7385;
+    --table-head: #8d93a4;
+    --accent: #f47521;
+    --success: #1aa86a;
+    --success-soft: #e7f5ed;
+    --warning: #d97706;
+    --warning-soft: #fff1e0;
+    --danger: #e0413e;
+    --danger-soft: #fde9e8;
+    --radius: 14px;
+    --radius-sm: 10px;
+    --shadow-card: 0 1px 0 rgba(20,26,46,.03), 0 4px 14px rgba(20,26,46,.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0c0f17;
+      --surface: #131826;
+      --surface-2: #0f1421;
+      --surface-hover: #182033;
+      --border: #1f2839;
+      --border-strong: #2a3447;
+      --text: #f0f2f7;
+      --text-muted: #8a93a8;
+      --success-soft: #10281c;
+      --warning-soft: #2a1f0c;
+      --danger-soft: #2a1315;
+      --shadow-card: none;
+    }
+  }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); }
+  ext-sudo-grant { display: block; height: 100%; }
+</style>
+</head>
+<body>
+  <ext-sudo-grant></ext-sudo-grant>
+  <script src="/ext/sudo-grant/component.js"></script>
+</body>
+</html>
