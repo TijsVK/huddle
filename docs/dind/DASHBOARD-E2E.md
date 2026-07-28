@@ -59,3 +59,45 @@ Blazor-shell grep.
   nested-container support, same as the rest of the DinD harness.
 
 Screenshots (`.artifacts/`) are git-ignored — they are run evidence, not fixtures.
+
+---
+
+# Video-recorded web-UI E2E (operator portal)
+
+`e2e-webui-docker-hello.sh` records a **video + per-step screenshots** of an
+operator driving the Huddle portal itself, end to end:
+
+```
+bash gateway/test/dind-compat/e2e-webui-docker-hello.sh
+```
+
+1. open the web UI + log in (token in the pre-hash query string)
+2. add a devcontainer via the Start modal (VS Code, default image, empty)
+3. enable docker functionalities on the Docker permissions page (Permanent grant
+   + Pull toggle)
+4. run `docker run hello-world` inside the container
+5. **approve the firewall rules the image pull needs, live in the UI**, as each
+   registry domain surfaces (`registry-1.docker.io`, `auth.docker.io`,
+   `production.cloudfront.docker.com`) — via the radial "pie menu" → Allow globally
+6. verify the run printed `Hello from Docker!`
+
+**DinD mode is deliberate**: it is the only mode where the container's own docker
+pull egresses through Huddle, so the pull genuinely requires firewall approval in
+the UI. (Classic mode pulls on a host-side daemon and never asks; it also blocks
+the interactive attach hijack with a 403.)
+
+The browser runs in the probe image with `--network host` so `localhost:<port>`
+reaches the gateway's published UI/API port. The host runs `docker run hello-world`
+on a retry loop; browser and host coordinate through the shared `.artifacts/`
+mount (`hello.done` marker), so the operator keeps approving pending requests until
+the pull finally succeeds — the retry-then-succeed pattern in `hello.out` is the
+proof the approval unblocked it live.
+
+Output: `.artifacts/webui-docker-hello/ui-demo-flow.webm` + `NN-*.png` step shots.
+
+| File | Role |
+|------|------|
+| `e2e-webui-docker-hello.sh` | orchestrator: gateway + host hello-world loop + browser |
+| `lib/ui-demo-flow.mjs` | Playwright flow: login → add container → enable docker → approve rules → verify (video + screenshots) |
+
+Flags: `REUSE=1` reuse a running gateway; `KEEP=1` leave the stack up.
