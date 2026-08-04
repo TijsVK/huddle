@@ -161,7 +161,7 @@ function Initialize-HuddleEngine {
 function Start-HuddleOnEngine {
     param(
         [string]$RepoRoot = $PSScriptRoot,
-        [int]$Port = 3000,
+        [int]$Port = $(if ($env:HUDDLE_PORT) { [int]$env:HUDDLE_PORT } else { 3000 }),
         [string]$Image = 'huddle',
         [switch]$SkipBuild
     )
@@ -191,7 +191,8 @@ function Start-HuddleOnEngine {
         Write-Host "  WSL2 distros share one netns, so this is usually a huddle container on" -ForegroundColor Yellow
         Write-Host "  Docker Desktop's daemon. Stop it (or quit Docker Desktop) and retry:" -ForegroundColor Yellow
         Write-Host "    docker rm -f huddle        # in a Windows terminal (Docker Desktop)" -ForegroundColor Yellow
-        Write-Host "  Or run Huddle on another port: `$env:HUDDLE_PORT = '3100'" -ForegroundColor Yellow
+        Write-Host "  Or pick another port BEFORE starting huddle.ps1:" -ForegroundColor Yellow
+        Write-Host "      `$env:HUDDLE_PORT = '3100'   # then re-run .\huddle.ps1" -ForegroundColor Yellow
         return $false
     }
 

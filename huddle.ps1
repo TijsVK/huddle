@@ -3,8 +3,10 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 $HUDDLE_CONTAINER = "huddle"
-$HUDDLE_IMAGE     = "huddle"
-$HUDDLE_PORT      = 3000
+$HUDDLE_IMAGE     = if ($env:HUDDLE_IMAGE) { $env:HUDDLE_IMAGE } else { "huddle" }
+# Port: overridable with $env:HUDDLE_PORT (was hard-coded, so setting the env var
+# did nothing - and Initialize-Huddle even overwrote it with the hard-coded value).
+$HUDDLE_PORT      = if ($env:HUDDLE_PORT) { [int]$env:HUDDLE_PORT } else { 3000 }
 
 # Sysbox-modus (experiment): elke devcontainer draait onder sysbox-runc met een
 # EIGEN dockerd erin — geen socket-proxy, geen dind-sidecar, geen authz-plugin.
