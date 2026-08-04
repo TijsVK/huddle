@@ -138,6 +138,8 @@ function Show-Menu {
     Write-Host "   5  Tests draaien (unit + e2e)" -ForegroundColor White
     Write-Host "   6  Sysbox engine host opzetten/controleren (WSL2)" -ForegroundColor White
     Write-Host "  -----------------------------------------" -ForegroundColor DarkGray
+    Write-Host "   r  Status verversen (Enter doet hetzelfde)" -ForegroundColor White
+    Write-Host "  -----------------------------------------" -ForegroundColor DarkGray
     Write-Host "   0  Afsluiten" -ForegroundColor DarkGray
     Write-Host ""
 }
@@ -674,6 +676,15 @@ while ($running) {
             Read-Host "`n  Druk Enter om terug te gaan"
         }
         '0' { $running = $false }
+        { $_ -in @('r', 'R', '') } {
+            # Alleen verversen: de lus tekent het menu (incl. Write-Status) opnieuw.
+            if ($SYSBOX_MODE -and (Get-Command Invoke-Engine -ErrorAction SilentlyContinue)) {
+                Write-Host "  Containers op de engine:" -ForegroundColor DarkCyan
+                Invoke-Engine -Command 'docker ps -a --format "  {{.Names}}  |  {{.Status}}"' | Out-Null
+                Write-Host ""
+                Start-Sleep -Milliseconds 400
+            }
+        }
         default { Write-Host "  Ongeldige keuze." -ForegroundColor Red; Start-Sleep -Seconds 1 }
     }
 }
