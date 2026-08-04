@@ -372,10 +372,13 @@ function Set-VsCodeDockerShim {
     Write-Ok "shim reaches the engine (containers: $((($names | Where-Object { $_ }) -join ', ')))"
 
     $settings = Join-Path $env:APPDATA 'Code\User\settings.json'
-    $escaped = $shim -replace '\\', '\\\\'
+    # JSON needs each backslash doubled. Plain .NET Replace - a -replace regex here
+    # is how the printed value ended up with four backslashes.
+    $escaped = $shim.Replace('\', '\\')
+    $line = '"dev.containers.dockerPath": "' + $escaped + '"'
     Write-Host ""
-    Write-Host "  Add to VS Code settings.json ($settings):" -ForegroundColor White
-    Write-Host "      `"dev.containers.dockerPath`": `"$escaped`"" -ForegroundColor Yellow
+    Write-Host "  Setting for VS Code settings.json ($settings):" -ForegroundColor White
+    Write-Host "      $line" -ForegroundColor Yellow
     Write-Host "  Then: F1 -> Developer: Reload Window, and F1 -> Dev Containers: Attach to Running Container" -ForegroundColor DarkGray
     Write-Host "  (Undo later by removing that setting; Docker Desktop is untouched.)" -ForegroundColor DarkGray
 
@@ -385,16 +388,29 @@ function Set-VsCodeDockerShim {
         return $true
     }
     if (-not (Test-Path $settings)) { Write-Bad "settings.json not found at $settings - add the line manually"; return $false }
+
+    # Edit as TEXT, not via ConvertFrom-Json: VS Code settings are JSONC (comments,
+    # trailing commas), which the JSON parser rejects ("Invalid JSON primitive"),
+    # and a re-serialise would strip the user's comments and ordering anyway.
     try {
         $raw = Get-Content $settings -Raw
-        $json = $raw | ConvertFrom-Json -ErrorAction Stop            # fails on JSONC comments
-        $json | Add-Member -NotePropertyName 'dev.containers.dockerPath' -NotePropertyValue $shim -Force
         Copy-Item $settings "$settings.huddle-backup" -Force
-        ($json | ConvertTo-Json -Depth 32) | Set-Content $settings -Encoding UTF8
-        Write-Ok "settings.json updated (backup: $settings.huddle-backup). Reload the VS Code window."
+        $pattern = '"dev\.containers\.dockerPath"\s*:\s*"(?:[^"\\]|\\.)*"'
+        if ([regex]::IsMatch($raw, $pattern)) {
+            $new = [regex]::Replace($raw, $pattern, { param($m) $line })
+            $what = 'updated existing setting'
+        } else {
+            $idx = $raw.IndexOf('{')
+            if ($idx -lt 0) { Write-Bad "settings.json has no JSON object - add the line manually"; return $false }
+            $new = $raw.Insert($idx + 1, "`r`n    $line,")
+            $what = 'added setting'
+        }
+        Set-Content -Path $settings -Value $new -Encoding UTF8
+        Write-Ok "$what in settings.json (backup: $settings.huddle-backup)"
+        Write-Host "  Reload the VS Code window, then attach." -ForegroundColor DarkGray
         return $true
     } catch {
-        Write-Bad "could not edit settings.json automatically ($($_.Exception.Message)) - add the line manually"
+        Write-Bad "could not edit settings.json ($($_.Exception.Message)) - add the line manually"
         return $false
     }
 }
