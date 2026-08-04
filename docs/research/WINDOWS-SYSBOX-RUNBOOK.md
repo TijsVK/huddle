@@ -206,11 +206,42 @@ time of writing is `fusermount3`.
 
 ## IDE attach
 
-VS Code's Dev Containers extension queries the **local** docker (Docker Desktop), so it lists
-nothing: the devcontainers live on the engine daemon. VS Code has to run inside the distro —
-`-Code` does `code --remote wsl+huddle-engine`, after which *Dev Containers: Attach to Running
-Container* shows them. This also means `/etc/wsl.conf` must keep `appendWindowsPath=true`;
-an earlier version set it to `false`, which removes `code` from the PATH inside the distro.
+The devcontainers run on the **engine's** docker daemon, so a stock VS Code on Windows (which
+talks to Docker Desktop) lists nothing. Two ways to fix that; the first keeps the normal
+"open the VS Code you already have" flow.
+
+### 1. Stock VS Code on Windows, via the docker shim (preferred)
+
+```powershell
+.\huddle-engine.ps1 -VsCode          # verifies the shim, prints the setting
+.\huddle-engine.ps1 -VsCode -Apply   # writes it to settings.json (with a backup)
+# then: F1 -> Developer: Reload Window
+#       F1 -> Dev Containers: Attach to Running Container
+```
+
+`scripts/huddle-docker.cmd` forwards every docker command to the engine over `wsl.exe`, and
+VS Code is pointed at it with `"dev.containers.dockerPath"`. No TCP socket, no sshd, no
+Remote-WSL window; Docker Desktop stays untouched for everything else. Measured on a real
+Windows box: **136 ms per docker call**, which is fine for the extension's polling.
+
+Two details the shim gets right, both learned the hard way — the extension parses
+`docker version --format {{json .}}` as JSON, so *anything* printed before it breaks the attach
+with "docker returned an error / make sure the docker daemon is running":
+
+- no `-u root`, because WSL prints `Failed to start the systemd user session for 'root'` on that
+  path (hence the installer putting the distro's default user in the `docker` group);
+- `--cd /`, so `wsl.exe` never translates the caller's Windows working directory (a UNC or
+  network path makes it warn).
+
+### 2. VS Code running inside the distro (fallback)
+
+`.\huddle-engine.ps1 -Code` opens `code --remote wsl+huddle-engine`. The window must show
+`WSL: huddle-engine` bottom-left. This needs `appendWindowsPath=true` in `/etc/wsl.conf` (an
+earlier version set it to `false`, which removes `code` from the PATH inside the distro).
+
+### JetBrains Gateway
+
+Add a Docker server on WSL (`huddle-engine`) under Dev Containers. Not yet verified.
 
 ## Gotchas that cost time here
 
