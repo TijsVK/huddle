@@ -240,12 +240,19 @@ function Start-HuddleOnEngine {
         Write-Ok "CLI built"
     }
 
+    # Stop the previous gateway FIRST. `huddle init` removes it anyway, but the
+    # port preflight below runs before init - without this, the previous gateway
+    # holds the port, the preflight refuses, and a re-init can never succeed.
+    Invoke-Engine -Quiet -Command 'docker rm -f huddle >/dev/null 2>&1; true' | Out-Null
+
     # Preflight: WSL2 distros SHARE one network namespace, so a huddle container
-    # on Docker Desktop's daemon (e.g. left over from a classic init) already owns
-    # :$Port in that namespace. The engine's container then cannot bind it and
-    # exits immediately with an empty log - the classic "starts and stops" symptom.
+    # on Docker Desktop's daemon (e.g. left over from a classic init) still owns
+    # the port even after the engine-side container is gone. The engine's new
+    # container then cannot bind it and exits immediately with an empty log.
     if ((Invoke-Engine -Quiet -Command "ss -tln 2>/dev/null | grep -q ':$Port '") -eq 0) {
-        Write-Bad "port $Port is already in use inside the WSL network namespace."
+        Write-Bad "port $Port is still in use inside the WSL network namespace after removing the engine's gateway."
+        Write-Host "  Holder:" -ForegroundColor Yellow
+        Invoke-Engine -Command "ss -tlnp 2>/dev/null | grep ':$Port '" | Out-Null
         Write-Host "  WSL2 distros share one netns, so this is usually a huddle container on" -ForegroundColor Yellow
         Write-Host "  Docker Desktop's daemon. Stop it (or quit Docker Desktop) and retry:" -ForegroundColor Yellow
         Write-Host "    docker rm -f huddle        # in a Windows terminal (Docker Desktop)" -ForegroundColor Yellow
@@ -275,6 +282,8 @@ function Start-HuddleOnEngine {
     Write-Step "gateway log (last lines)"
     Invoke-Engine -Command 'docker logs --tail 15 huddle 2>&1' | Out-Null
     Write-Ok "Huddle running in Sysbox mode - portal: http://localhost:$Port"
+    Write-Host "  (the gateway logs '[api] listening on 127.0.0.1:3000' - that is the port INSIDE" -ForegroundColor DarkGray
+    Write-Host "   the container; it is published on the host as $Port)" -ForegroundColor DarkGray
     Write-Host "  Follow the log:  wsl -d $ENGINE_DISTRO -- docker logs -f huddle" -ForegroundColor DarkGray
     Write-Host "  Container state: wsl -d $ENGINE_DISTRO -- docker ps -a" -ForegroundColor DarkGray
     Write-Host "  Devcontainers live on the engine's docker daemon. To attach an IDE:" -ForegroundColor DarkGray

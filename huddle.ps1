@@ -222,6 +222,12 @@ function Initialize-Huddle {
     }
 
     Write-Host "  Initialiseren via 'huddle init' (runtime '${RUNTIME}', HUDDLE_NO_PULL=1, image '${HUDDLE_IMAGE}')..." -ForegroundColor DarkCyan
+    # Remember what the CALLER set: the cleanup below used to Remove-Item these
+    # unconditionally, so a user's `$env:HUDDLE_PORT = '3100'` was wiped after the
+    # first init and every later run silently fell back to 3000.
+    $prevImage  = $env:HUDDLE_IMAGE
+    $prevNoPull = $env:HUDDLE_NO_PULL
+    $prevPort   = $env:HUDDLE_PORT
     $env:HUDDLE_IMAGE   = $HUDDLE_IMAGE
     $env:HUDDLE_NO_PULL = '1'
     $env:HUDDLE_PORT    = "$HUDDLE_PORT"
@@ -233,7 +239,10 @@ function Initialize-Huddle {
         }
         return $true
     } finally {
-        Remove-Item Env:HUDDLE_IMAGE, Env:HUDDLE_NO_PULL, Env:HUDDLE_PORT -ErrorAction SilentlyContinue
+        # Restore, don't delete.
+        if ($null -ne $prevImage)  { $env:HUDDLE_IMAGE = $prevImage }   else { Remove-Item Env:HUDDLE_IMAGE -ErrorAction SilentlyContinue }
+        if ($null -ne $prevNoPull) { $env:HUDDLE_NO_PULL = $prevNoPull } else { Remove-Item Env:HUDDLE_NO_PULL -ErrorAction SilentlyContinue }
+        if ($null -ne $prevPort)   { $env:HUDDLE_PORT = $prevPort }     else { Remove-Item Env:HUDDLE_PORT -ErrorAction SilentlyContinue }
     }
 }
 
