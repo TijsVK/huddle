@@ -179,40 +179,57 @@ function Test-EngineKeepalive {
 }
 
 function Start-EngineKeepalive {
+    param([switch]$Verbose2)
     $marker = 'huddle-engine-keepalive'
-    if ((Invoke-Engine -Quiet -Command "pgrep -f $marker >/dev/null 2>&1") -eq 0) {
-        Write-Ok "keepalive already running (distro stays up)"
-        return $true
-    }
-    # Start-Process joins -ArgumentList with spaces WITHOUT quoting, so an element
-    # containing spaces is split into separate arguments: passing
-    #   'bash','-c','exec -a marker sleep infinity'
-    # made bash run the command string "exec" and exit instantly - which is why
-    # the keepalive never appeared. Verified by dumping argv from a child process.
-    # So: install a launcher in the distro (Invoke-Engine handles quoting via
-    # base64) and start it with arguments that contain no spaces at all.
-    $installer = @(
-        'printf "%s\n" "#!/bin/bash" "exec -a ' + $marker + ' sleep infinity" > /usr/local/bin/huddle-keepalive',
-        'chmod +x /usr/local/bin/huddle-keepalive'
-    ) -join ' && '
-    if ((Invoke-Engine -Quiet -Command $installer) -ne 0) {
-        Write-Host "  [i] could not install the keepalive launcher" -ForegroundColor DarkGray
+    $launcher = '/usr/local/bin/huddle-keepalive'
+    if (Test-EngineKeepalive) { Write-Ok "keepalive already running (distro stays up)"; return $true }
+
+    # 1. the launcher itself (space-free path, so Start-Process cannot split it)
+    $installer = 'printf "%s\n" "#!/bin/bash" "exec -a ' + $marker + ' sleep infinity" > ' + $launcher + ' && chmod +x ' + $launcher
+    Invoke-Engine -Quiet -Command $installer | Out-Null
+    if ((Invoke-Engine -Quiet -Command "test -x $launcher") -ne 0) {
+        Write-Bad "could not install $launcher on the engine"
+        Invoke-Engine -Command "ls -l $launcher 2>&1; id; mount | grep -c ' / '" | Out-Null
         return $false
     }
-    Start-Process -FilePath 'wsl.exe' `
-        -ArgumentList @('-d', $ENGINE_DISTRO, '-u', 'root', '--', '/usr/local/bin/huddle-keepalive') `
-        -WindowStyle Hidden | Out-Null
-    foreach ($i in 1..10) {
-        Start-Sleep -Seconds 1
-        if ((Invoke-Engine -Quiet -Command "pgrep -f $marker >/dev/null 2>&1") -eq 0) {
-            Write-Ok "keepalive started - '$ENGINE_DISTRO' stays up while you work"
-            return $true
+    if ($Verbose2) { Write-Host "  launcher installed: $launcher" -ForegroundColor DarkGray }
+
+    # 2. attempt A - Start-Process (detached, hidden)
+    $out = Join-Path $env:TEMP 'huddle-keepalive.out'
+    $err = Join-Path $env:TEMP 'huddle-keepalive.err'
+    $proc = $null
+    try {
+        $proc = Start-Process -FilePath 'wsl.exe' `
+            -ArgumentList @('-d', $ENGINE_DISTRO, '-u', 'root', '--', $launcher) `
+            -WindowStyle Hidden -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+    } catch {
+        Write-Host "  [i] Start-Process failed: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+    Start-Sleep -Seconds 2
+    if ($proc -and $proc.HasExited) {
+        Write-Host "  [i] wsl.exe exited immediately (exit $($proc.ExitCode))" -ForegroundColor DarkGray
+        foreach ($f in @($out, $err)) {
+            if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) {
+                Write-Host "      $(Split-Path $f -Leaf): $((Get-Content $f -Raw).Trim())" -ForegroundColor DarkGray
+            }
         }
     }
-    # Not fatal: the gateway has --restart unless-stopped, so it returns with the
-    # daemon. Only the idle teardown/restart cycle is not suppressed.
-    Write-Host "  [i] no keepalive process; the distro may stop when idle." -ForegroundColor DarkGray
-    Write-Host "      Huddle restarts with dockerd, or keep a shell open: wsl -d $ENGINE_DISTRO" -ForegroundColor DarkGray
+    foreach ($i in 1..8) {
+        if (Test-EngineKeepalive) { Write-Ok "keepalive started (Start-Process) - '$ENGINE_DISTRO' stays up"; return $true }
+        Start-Sleep -Seconds 1
+    }
+
+    # 3. attempt B - cmd's own detacher, in case Start-Process/PowerShell reaps it
+    Write-Host "  [i] retrying via 'cmd /c start /b'" -ForegroundColor DarkGray
+    & cmd.exe /c "start `"huddle-keepalive`" /b wsl.exe -d $ENGINE_DISTRO -u root -- $launcher" | Out-Null
+    foreach ($i in 1..8) {
+        if (Test-EngineKeepalive) { Write-Ok "keepalive started (cmd start /b) - '$ENGINE_DISTRO' stays up"; return $true }
+        Start-Sleep -Seconds 1
+    }
+
+    # 4. give up with facts, not a shrug
+    Write-Host "  [i] no keepalive process could be held open." -ForegroundColor DarkGray
+    Invoke-Engine -Command "echo 'launcher:'; ls -l $launcher; echo 'processes:'; pgrep -af sleep || echo '(no sleep processes)'; echo 'distro uptime:'; cat /proc/uptime" | Out-Null
     return $false
 }
 
@@ -405,7 +422,7 @@ if ($Code)     { if (Open-EngineInVsCode) { exit 0 } else { exit 1 } }
 if ($Attach)   { Show-AttachHelp; exit 0 }
 if ($Up)       { if (Start-EngineStack) { exit 0 } else { exit 1 } }
 if ($Keepalive) {
-    if (Start-EngineKeepalive) {
+    if (Start-EngineKeepalive -Verbose2) {
         Invoke-Engine -Command 'pgrep -af huddle-engine-keepalive' | Out-Null
         exit 0
     }
@@ -414,7 +431,7 @@ if ($Keepalive) {
     Write-Host "    1. keep one shell open:  wsl -d $ENGINE_DISTRO" -ForegroundColor Yellow
     Write-Host "    2. stop WSL idling the VM: add to %USERPROFILE%\.wslconfig" -ForegroundColor Yellow
     Write-Host "         [wsl2]" -ForegroundColor Yellow
-    Write-Host "         vmIdleTimeout=-1" -ForegroundColor Yellow
+    Write-Host "         vmIdleTimeout=315360000000   # ~10 years in ms (-1 is not accepted everywhere)" -ForegroundColor Yellow
     Write-Host "       then: wsl --shutdown  (and start Huddle again)" -ForegroundColor Yellow
     exit 1
 }
