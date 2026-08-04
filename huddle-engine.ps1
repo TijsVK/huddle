@@ -22,7 +22,8 @@ param(
     [switch]$Up,
     [switch]$Keepalive,
     [switch]$VsCode,
-    [switch]$Apply
+    [switch]$Apply,
+    [switch]$IsolatePath
 )
 
 # NB: do NOT set $ErrorActionPreference here. huddle.ps1 dot-sources this file,
@@ -407,8 +408,9 @@ function Set-VsCodeDockerShim {
         Write-Host "  [!] the distro's PATH also resolves a Windows docker:" -ForegroundColor Yellow
         $whichText -split "`n" | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
         Write-Host "      The shim calls /usr/bin/docker explicitly, so it is unaffected." -ForegroundColor DarkGray
-        Write-Host "      But turn OFF Rancher/Docker Desktop WSL integration for '$ENGINE_DISTRO'," -ForegroundColor Yellow
-        Write-Host "      or a VS Code window running INSIDE the distro will use the wrong daemon." -ForegroundColor Yellow
+        Write-Host "      A VS Code window running INSIDE the distro can pick that one instead. Fix with either:" -ForegroundColor Yellow
+        Write-Host "        rdctl set --WSL.integrations.$ENGINE_DISTRO=false     (Rancher Desktop CLI)" -ForegroundColor Yellow
+        Write-Host "        .\huddle-engine.ps1 -IsolatePath                       (drop the Windows PATH entirely)" -ForegroundColor Yellow
     }
     $names = & cmd.exe /c "`"$shim`" ps --format `"{{.Names}}`"" 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -465,6 +467,32 @@ function Set-VsCodeDockerShim {
         Write-Bad "could not edit settings.json ($($_.Exception.Message)) - add the line manually"
         return $false
     }
+}
+
+
+# Cut the Windows PATH out of the engine distro. Another Windows docker CLI on
+# that PATH (Rancher Desktop, Docker Desktop) is what makes a VS Code window
+# running INSIDE the distro talk to the wrong daemon - and Rancher's GUI does not
+# always offer a per-distro integration toggle.
+#
+# Cost: `code`, `docker.exe` and other Windows binaries are no longer callable
+# from inside the distro. The Windows-side flow does not need them: -Code launches
+# VS Code from Windows (code --remote wsl+<distro>), and the shim calls
+# /usr/bin/docker by absolute path.
+function Disable-EngineWindowsPath {
+    if (-not (Test-HuddleEngine)) { Write-Bad "distro '$ENGINE_DISTRO' does not exist"; return $false }
+    Write-Step "removing the Windows PATH from '$ENGINE_DISTRO'"
+    $cmd = 'u=$(sed -n "s/^default=//p" /etc/wsl.conf 2>/dev/null | head -1); ' +
+           "printf '%s\n' '[boot]' 'systemd=true' '' '[interop]' 'enabled=true' 'appendWindowsPath=false' > /etc/wsl.conf; " +
+           'if [ -n "$u" ]; then printf "%s\n" "" "[user]" "default=$u" >> /etc/wsl.conf; fi; ' +
+           "sed -i 's/\r$//' /etc/wsl.conf; true"
+    if ((Invoke-Engine -Command $cmd) -ne 0) { Write-Bad "could not write /etc/wsl.conf"; return $false }
+    & wsl.exe --terminate $ENGINE_DISTRO | Out-Null
+    Write-Ok "done - restart the stack with: .\huddle-engine.ps1 -Up"
+    Write-Host "  Verify afterwards:  wsl -d $ENGINE_DISTRO -- which -a docker   (only /usr/bin/docker)" -ForegroundColor DarkGray
+    Write-Host "  If Rancher Desktop still injects itself, disable its integration for this distro:" -ForegroundColor DarkGray
+    Write-Host "      rdctl set --WSL.integrations.$ENGINE_DISTRO=false" -ForegroundColor DarkGray
+    return $true
 }
 
 # Bring everything back after the distro (or Windows) restarted, without a
@@ -545,7 +573,7 @@ function Show-AttachHelp {
 
 # Standalone entry points. Strict mode only applies when this script is RUN,
 # not when huddle.ps1 dot-sources it.
-if ($Setup -or $Check -or $Shell -or $Diagnose -or $Code -or $Attach -or $Up -or $Keepalive -or $VsCode) { $ErrorActionPreference = 'Stop' }
+if ($Setup -or $Check -or $Shell -or $Diagnose -or $Code -or $Attach -or $Up -or $Keepalive -or $VsCode -or $IsolatePath) { $ErrorActionPreference = 'Stop' }
 if ($Setup) { if (Initialize-HuddleEngine -RepoRoot $PSScriptRoot) { exit 0 } else { exit 1 } }
 if ($Check) { if (Test-EngineReady) { exit 0 } else { exit 1 } }
 if ($Shell) { & wsl.exe -d $ENGINE_DISTRO; exit $LASTEXITCODE }
@@ -553,6 +581,7 @@ if ($Diagnose) { if (Get-EngineDiagnostics) { exit 0 } else { exit 1 } }
 if ($Code)     { if (Open-EngineInVsCode) { exit 0 } else { exit 1 } }
 if ($Attach)   { Show-AttachHelp; exit 0 }
 if ($VsCode)   { if (Set-VsCodeDockerShim -Apply:$Apply) { exit 0 } else { exit 1 } }
+if ($IsolatePath) { if (Disable-EngineWindowsPath) { exit 0 } else { exit 1 } }
 if ($Up)       { if (Start-EngineStack) { exit 0 } else { exit 1 } }
 if ($Keepalive) {
     if (Start-EngineKeepalive -Verbose2) {
