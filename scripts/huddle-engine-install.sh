@@ -22,6 +22,17 @@ no(){ printf '  \033[31m[--]\033[0m %s\n' "$*"; }
 info(){ printf '\033[36m==\033[0m %s\n' "$*"; }
 fatal(){ printf '\033[31m[FATAL]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# After a distro restart systemd is still bringing services up, so every check
+# below must wait instead of concluding "not installed" from a race.
+wait_for_docker(){
+  for _i in $(seq 1 30); do docker info >/dev/null 2>&1 && return 0; sleep 2; done
+  return 1
+}
+wait_for_sysbox(){
+  for _i in $(seq 1 15); do systemctl is-active --quiet sysbox 2>/dev/null && return 0; sleep 2; done
+  return 1
+}
+
 [ "$(id -u)" = 0 ] || fatal "run as root (sudo)."
 
 # -- 1. prerequisites ---------------------------------------------------------
@@ -146,8 +157,10 @@ if id "$HUDDLE_ENGINE_USER" >/dev/null 2>&1 && [ $CHECK_ONLY -eq 0 ]; then
 fi
 
 # -- 3. sysbox ----------------------------------------------------------------
+info "waiting for dockerd"
+if wait_for_docker; then ok "dockerd responding"; else no "dockerd not responding yet"; fi
 info "checking sysbox"
-if command -v sysbox-runc >/dev/null 2>&1 && systemctl is-active --quiet sysbox 2>/dev/null; then
+if command -v sysbox-runc >/dev/null 2>&1 && wait_for_sysbox; then
   ok "sysbox active ($(sysbox-runc --version 2>/dev/null | awk '/version/{print $2}' | head -1))"
 else
   [ $CHECK_ONLY -eq 1 ] && { no "sysbox not installed/active"; exit 1; }
@@ -176,13 +189,36 @@ fi
 
 # -- 4. docker runtime registration -------------------------------------------
 info "checking runtime registration"
+wait_for_docker || true
 if docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q 'sysbox-runc'; then
   ok "dockerd knows the sysbox-runc runtime"
-else
+elif [ $CHECK_ONLY -eq 1 ]; then
   no "sysbox-runc is not registered in dockerd"
-  [ $CHECK_ONLY -eq 1 ] && exit 1
-  fatal "add it to /etc/docker/daemon.json and restart docker:
-       {\"runtimes\":{\"sysbox-runc\":{\"path\":\"/usr/bin/sysbox-runc\"}}}"
+  exit 1
+else
+  # Register it ourselves instead of telling the user to hand-edit JSON. Merge,
+  # never overwrite: the file may hold the user's own daemon settings.
+  info "registering the sysbox-runc runtime in /etc/docker/daemon.json"
+  [ -s /etc/docker/daemon.json ] || echo '{}' > /etc/docker/daemon.json
+  tmp=$(mktemp)
+  if jq '.runtimes."sysbox-runc".path = "/usr/bin/sysbox-runc"' /etc/docker/daemon.json > "$tmp" 2>/dev/null; then
+    cp /etc/docker/daemon.json /etc/docker/daemon.json.huddle-backup 2>/dev/null || true
+    cp "$tmp" /etc/docker/daemon.json
+    rm -f "$tmp"
+    systemctl restart docker
+    wait_for_docker || true
+    if docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q 'sysbox-runc'; then
+      ok "sysbox-runc registered and dockerd restarted"
+    else
+      no "still not registered - check: journalctl -u docker -n 30"
+      exit 1
+    fi
+  else
+    rm -f "$tmp"
+    no "could not edit /etc/docker/daemon.json (is jq installed?). Add manually:"
+    printf '      %s\n' '{"runtimes":{"sysbox-runc":{"path":"/usr/bin/sysbox-runc"}}}'
+    exit 1
+  fi
 fi
 
 # -- 5. smoke test ------------------------------------------------------------
