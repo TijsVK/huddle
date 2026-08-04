@@ -16,7 +16,10 @@ param(
     [switch]$Setup,
     [switch]$Check,
     [switch]$Shell,
-    [switch]$Diagnose
+    [switch]$Diagnose,
+    [switch]$Code,
+    [switch]$Attach,
+    [switch]$Up
 )
 
 # NB: do NOT set $ErrorActionPreference here. huddle.ps1 dot-sources this file,
@@ -98,24 +101,24 @@ function New-HuddleEngineDistro {
 }
 
 function Set-EngineWslConf {
-    # Only rewrite + restart when the config is actually wrong: terminating the
-    # distro kills the running gateway and every devcontainer, and menu option 6
-    # is also used as a plain "check my engine" action.
-    $needed = 'systemd=true'
-    if ((Invoke-Engine -Quiet -Command 'grep -q "^systemd=true" /etc/wsl.conf 2>/dev/null') -eq 0) {
-        Write-Ok "systemd already enabled in '$ENGINE_DISTRO' (left running)"
+    # Needed: systemd (sysbox ships systemd units) AND Windows PATH interop, so
+    # `code` / `code-insiders` work from inside the distro - that is how VS Code
+    # attaches to containers on the engine daemon. Only rewrite + restart when
+    # something is actually wrong: terminating the distro kills the gateway and
+    # every devcontainer.
+    $okSystemd = (Invoke-Engine -Quiet -Command 'grep -q "^systemd=true" /etc/wsl.conf 2>/dev/null') -eq 0
+    $okPath    = (Invoke-Engine -Quiet -Command 'grep -q "^appendWindowsPath=false" /etc/wsl.conf 2>/dev/null') -ne 0
+    if ($okSystemd -and $okPath) {
+        Write-Ok "wsl.conf already correct in '$ENGINE_DISTRO' (left running)"
         return $true
     }
-    Write-Step "enabling systemd in '$ENGINE_DISTRO' (Sysbox ships systemd units)"
-    # One-liner with printf instead of a here-doc: this .ps1 is checked out with
-    # CRLF on Windows, and a here-doc's terminator line would carry a \r (so bash
-    # never sees 'CONF') while every written line would keep its \r (so wsl fails
-    # with "Expected '=' in /etc/wsl.conf"). printf %s\n takes each line as an
-    # argument, so no embedded newlines exist to be mangled.
-    $cmd = "printf '%s\n' '[boot]' 'systemd=true' '' '[interop]' 'enabled=true' 'appendWindowsPath=false' > /etc/wsl.conf && sed -i 's/\r$//' /etc/wsl.conf"
+    Write-Step "writing /etc/wsl.conf in '$ENGINE_DISTRO' (systemd + Windows PATH interop)"
+    # printf per line instead of a here-doc: this .ps1 is checked out CRLF on
+    # Windows and a here-doc terminator would carry a \r.
+    $cmd = "printf '%s\n' '[boot]' 'systemd=true' '' '[interop]' 'enabled=true' 'appendWindowsPath=true' > /etc/wsl.conf && sed -i 's/\r$//' /etc/wsl.conf"
     if ((Invoke-Engine -Command $cmd) -ne 0) { Write-Bad "could not write /etc/wsl.conf"; return $false }
     & wsl.exe --terminate $ENGINE_DISTRO | Out-Null
-    Write-Ok "systemd enabled (distro terminated so it restarts with systemd)"
+    Write-Ok "wsl.conf written (distro restarted so it takes effect)"
     return $true
 }
 
@@ -318,10 +321,78 @@ function Get-EngineDiagnostics {
     return $true
 }
 
+
+
+# Bring everything back after the distro (or Windows) restarted, without a
+# full re-init: boot the distro, keepalive, dockerd, then the gateway itself.
+function Start-EngineStack {
+    if (-not (Test-HuddleEngine)) { Write-Bad "distro '$ENGINE_DISTRO' does not exist - run -Setup"; return $false }
+    Write-Step "starting the engine stack"
+    Invoke-Engine -Quiet -Command 'true' | Out-Null      # boots the distro if it is down
+    Start-EngineKeepalive | Out-Null
+    if ((Invoke-Engine -Quiet -Command 'systemctl is-active --quiet docker') -ne 0) {
+        Invoke-Engine -Quiet -Command 'systemctl start docker' | Out-Null
+        foreach ($i in 1..15) {
+            Start-Sleep -Seconds 1
+            if ((Invoke-Engine -Quiet -Command 'docker info >/dev/null 2>&1') -eq 0) { break }
+        }
+    }
+    if ((Invoke-Engine -Quiet -Command 'docker info >/dev/null 2>&1') -ne 0) { Write-Bad "dockerd is not responding on the engine"; return $false }
+    Write-Ok "dockerd up"
+
+    if ((Invoke-Engine -Quiet -Command 'docker inspect huddle >/dev/null 2>&1') -ne 0) {
+        Write-Bad "no huddle container on the engine - run .\huddle.ps1 and pick 4 to init"
+        return $false
+    }
+    Invoke-Engine -Quiet -Command 'docker start huddle >/dev/null 2>&1; true' | Out-Null
+    foreach ($i in 1..20) {
+        Start-Sleep -Seconds 1
+        if ((Invoke-Engine -Quiet -Command "docker inspect -f '{{.State.Running}}' huddle | grep -q true") -eq 0) {
+            Write-Ok "huddle is running"
+            Invoke-Engine -Command 'docker ps --format "  {{.Names}}  {{.Status}}"' | Out-Null
+            return $true
+        }
+    }
+    Write-Bad "huddle did not come up. Last log:"
+    Invoke-Engine -Command 'docker logs --tail 30 huddle 2>&1' | Out-Null
+    return $false
+}
+
+# VS Code / JetBrains attach helpers. The devcontainers live on the ENGINE's
+# docker daemon, so an IDE running on Windows (talking to Docker Desktop) sees
+# nothing. VS Code must run INSIDE the distro (Remote-WSL); its server then uses
+# the engine's docker.
+function Open-EngineInVsCode {
+    param([string]$Folder = '/root')
+    if (-not (Test-HuddleEngine)) { Write-Bad "distro '$ENGINE_DISTRO' does not exist"; return $false }
+    $code = Get-Command code -ErrorAction SilentlyContinue
+    if (-not $code) { Write-Bad "'code' not on PATH - open VS Code and use 'WSL: Connect to WSL using Distro...' -> $ENGINE_DISTRO"; return $false }
+    Write-Step "opening VS Code in '$ENGINE_DISTRO'"
+    & code --remote "wsl+$ENGINE_DISTRO" $Folder
+    Write-Ok "VS Code opening. Then: F1 -> 'Dev Containers: Attach to Running Container'"
+    Write-Host "  The container list now comes from the engine daemon, not Docker Desktop." -ForegroundColor DarkGray
+    return $true
+}
+
+function Show-AttachHelp {
+    Write-Step "attaching an IDE to a devcontainer on '$ENGINE_DISTRO'"
+    Invoke-Engine -Command 'docker ps --format "  {{.Names}}  ({{.Status}})"' | Out-Null
+    Write-Host ""
+    Write-Host "  VS Code:" -ForegroundColor White
+    Write-Host "    .\huddle-engine.ps1 -Code        (or: F1 -> WSL: Connect to WSL using Distro -> $ENGINE_DISTRO)" -ForegroundColor DarkGray
+    Write-Host "    then F1 -> Dev Containers: Attach to Running Container" -ForegroundColor DarkGray
+    Write-Host "  JetBrains Gateway:" -ForegroundColor White
+    Write-Host "    Gateway -> Dev Containers -> '...' -> add a Docker server on WSL ($ENGINE_DISTRO)" -ForegroundColor DarkGray
+    Write-Host "  Why: the IDE on Windows talks to Docker Desktop; these containers live on the engine." -ForegroundColor DarkGray
+}
+
 # Standalone entry points. Strict mode only applies when this script is RUN,
 # not when huddle.ps1 dot-sources it.
-if ($Setup -or $Check -or $Shell -or $Diagnose) { $ErrorActionPreference = 'Stop' }
+if ($Setup -or $Check -or $Shell -or $Diagnose -or $Code -or $Attach -or $Up) { $ErrorActionPreference = 'Stop' }
 if ($Setup) { if (Initialize-HuddleEngine -RepoRoot $PSScriptRoot) { exit 0 } else { exit 1 } }
 if ($Check) { if (Test-EngineReady) { exit 0 } else { exit 1 } }
 if ($Shell) { & wsl.exe -d $ENGINE_DISTRO; exit $LASTEXITCODE }
 if ($Diagnose) { if (Get-EngineDiagnostics) { exit 0 } else { exit 1 } }
+if ($Code)     { if (Open-EngineInVsCode) { exit 0 } else { exit 1 } }
+if ($Attach)   { Show-AttachHelp; exit 0 }
+if ($Up)       { if (Start-EngineStack) { exit 0 } else { exit 1 } }
