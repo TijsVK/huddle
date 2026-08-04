@@ -8,7 +8,61 @@ Docker socket filter.
 
 ---
 
-## 0. TL;DR
+## 0. Constraints, and the verdict they produce
+
+The survey in §4 was written *before* constraints were stated, against assumptions inferred
+from the repo (Windows-first, x86, self-hosted, cross-platform parity, untrusted-attacker
+threat bar). Several dismissals were therefore assumption-driven, not evidence-driven. The
+constraints as given on 2026-08-04:
+
+| Constraint | Value |
+|---|---|
+| Hosts | Windows 11 + WSL2 laptops **and** native Linux **and** macOS Apple Silicon — same UX on all three |
+| Threat bar | contain **supply-chain malware and a runaway agent**; *not* "survive a determined attacker hunting a kernel escape" |
+| Vendor posture | self-hosted OSS strongly preferred; a vendor CLI may be considered |
+| Must keep | JetBrains Gateway + VS Code attach; **Docker usable inside the sandbox** |
+| Not required | MITM path-level rules / body logging; portal container snapshots |
+
+**Two of those flip the ranking.** The lowered threat bar means a hypervisor is no longer
+mandatory — a per-container **user namespace** with virtualized `/proc`, `/sys` and no host
+device/socket access already contains malware and a runaway agent. And three-platform parity
+punishes anything that only exists on one OS.
+
+**Verdict under these constraints:**
+
+| Option | Verdict | Decided by |
+|---|---|---|
+| **Sysbox** (`--runtime=sysbox-runc`) | **Primary.** OSS (Apache-2.0), actively maintained (v0.7.1, 2026-07-31), amd64 + arm64, Docker-native, and its headline feature is exactly "run Docker inside an unprivileged container". | matches every constraint |
+| Kata Containers | **Optional upgrade** where KVM exists (native Linux hosts, or a Win11 host with nested virt) — buy a real VM boundary later without changing Huddle's model. | not needed at this threat bar; Linux-only |
+| Docker `sbx` | **Benchmark / fallback**, not primary: vendor CLI, owns the sandbox lifecycle, audit logs are a paid tier, and IDE attach is unproven. It does cover all three OSes with a real microVM, so keep measuring it. | vendor posture |
+| gVisor | Keep on the bench. Stronger than Sysbox, but nested Docker needs the tmpfs-`/var/lib/docker` workaround and the syscall tax lands on IDE/build loops. | cost, not correctness |
+| WSL-distro-per-devcontainer / `wslc` | Still out, but now for a *different* reason: Windows-only (fails parity) and `wslc` can't nest. Not because the boundary is "too weak" — at this threat bar it might have sufficed. | parity |
+| Cleanroom / SporeVM | Out: x86-64 is an experimental 512 MiB one-shot profile. Would be a top contender on an ARM-only fleet. | Windows/Linux x86 in scope |
+| Sysbox via Docker Desktop **ECI** | Out as the mechanism (Desktop-only, Business tier), but it is the same runtime — so the compatibility story is commercially well-trodden. | OSS preference |
+| Apple `container` | Out on fact: no Docker API, so devcontainers/compose/Testcontainers don't work. | "Docker usable inside" |
+
+**Shape of the primary design:** a controlled Linux **engine host** per platform — native on
+Linux, a dedicated WSL2 distro on Windows, a Lima VM on macOS — running `dockerd` with the
+Sysbox runtime. Devcontainers stay ordinary Docker containers (so IDE attach, labels, exec and
+`docker commit` all keep working), but each one is user-namespaced and can run its **own
+Docker daemon unprivileged** — which deletes the `--privileged` sidecar, the authz plugin, the
+bind allowlist and the `nosymfollow` remount in one go. Egress stays host-side (§5).
+
+Free bonus, explicitly *not* claimed as a boundary: on Windows and macOS the engine host is
+already a VM, so an escape lands there rather than on the user's OS. On native Linux it lands
+on the developer's machine — that is the weakest deployment and the place to add Kata (or a
+Lima VM) if parity of claims matters.
+
+**Prerequisites measured on this WSL2 box (all present):** `systemd` as PID 1, kernel 6.6
+(≥ 5.19, so no shiftfs needed), user namespaces enabled (`max_user_namespaces=127249`),
+overlayfs on ext4, and `/dev/fuse` (sysbox-fs is FUSE-based). Sysbox's WSL2 issue
+(nestybox#32) was closed inconclusively back in 2023 citing WSL kernel limits — on this
+kernel the blockers look gone, but **unverified until installed**, and installing restarts
+`dockerd`, which kills running devcontainers, so it needs a throwaway distro (S2).
+
+---
+
+## 0b. Initial survey conclusion (assumption-driven — kept for the reasoning)
 
 1. **The wall we want already has a standard shape in 2026:** *one microVM per sandbox,
    with a full unrestricted Docker daemon inside it, and network egress allowlisted by a
@@ -70,6 +124,11 @@ filesystem boundary (virtiofs/9p or a copy) between host workspace and guest.
 
 ## 2. Threat model and today's boundary inventory
 
+> **Narrowed by §0:** the adversary below is the *maximal* one. The stated bar is
+> supply-chain malware and a runaway agent — an attacker who finds and drives a kernel exploit
+> is out of scope on the primary (Sysbox) plane, and in scope only on the optional Kata plane.
+> The boundary inventory itself is unaffected.
+
 **Adversary:** code executing inside a devcontainer — an AI agent running unattended, or a
 malicious dependency. Assume it is root-capable inside the devcontainer (the experiment
 branch grants exactly that), knows Huddle's design, and has full use of whatever Docker
@@ -109,7 +168,12 @@ to a non-allowlisted destination.
 ## 3. The design axiom to adopt
 
 > **Every boundary that matters is enforced by something the guest cannot address, and there
-> are only two of them: a hypervisor for compute, and a single network path for egress.**
+> are only two of them: a runtime boundary for compute, and a single network path for egress.**
+
+Under the §0 constraints the compute boundary is a **user namespace with virtualized `/proc`
+and `/sys` (Sysbox)** rather than a hypervisor; the rest of this section holds either way,
+since what matters is that the enforcement point is not reachable from inside the guest. Read
+"VM" below as "isolated box" and the argument is unchanged.
 
 Concretely:
 
@@ -221,7 +285,23 @@ list for Testcontainers), `--pid=host`/`--network=host` refused, and privileged 
   Desktop-only, so it cannot be Huddle's boundary on a Linux host or in CI. Sysbox CE is
   Linux-only, kernel-picky (ID-mapped mounts ≥5.12, ≥5.19 for full shiftfs replacement) and
   WSL2 support is unconfirmed.
-- **Verdict:** good *defence-in-depth inside* a VM, or a stopgap; not the wall.
+- **Verdict (revised, see §0):** at the stated threat bar Sysbox *is* the wall, and the
+  "shared kernel" objection is out of scope rather than fatal. Sysbox CE is Apache-2.0,
+  amd64 + arm64 (arm64 since v0.5.0), and shipped v0.7.1 on 2026-07-31, so the OSS path
+  does not depend on Docker Desktop or ECI at all. What it buys concretely:
+  - Docker/systemd/K8s **inside** an unprivileged container → no `--privileged` sidecar, no
+    dockerd authorization plugin, no bind-source allowlist, no `nosymfollow` remount.
+  - Per-container exclusive UID mapping with ID-mapped mounts, and virtualized `/proc` and
+    `/sys` — so the writable-host-kernel-interface vector that the DinD red test exploited
+    is not reachable in the first place.
+  - Writes to global kernel settings (module load, BPF settings) return `permission denied`.
+  - Docker-native (`--runtime=sysbox-runc`), so Huddle's orchestration, labels, exec, IDE
+    attach and `docker commit` are unchanged.
+  Open items for the spike: kernel ≥ 5.19 (met), Debian 13 is not on Sysbox's officially
+  tested distro list (Bullseye/Buster are; "expected to work with kernel ≥ 5.12"), WSL2
+  unverified, some mount types are intercepted (there is an open report about `mount -t cifs`
+  failing under Sysbox), and `network_mode: host` interacts badly with `userns-remap` if we
+  ever enable that daemon-wide.
 
 ### E. gVisor (runsc) — user-space kernel
 
@@ -326,7 +406,7 @@ adopt this for the AI keys and git tokens it currently hands into containers).
 
 ---
 
-## 6. Platform reality check (the gating constraint)
+## 6. Platform reality check (KVM — now only gates the optional Kata plane)
 
 Measured on the machine this research ran on:
 
@@ -401,7 +481,23 @@ render Running) and `e2e-webui-docker-hello.sh` (drives the Huddle portal's own 
 approval flow, with video + screenshots). Per prior lesson: do **not** accept log-greps as
 proof that a UI works.
 
-- **S1 — `sbx` viability (Windows, ~2 days).** Create a sandbox on a Win11 box; mount a real
+**Revised order under the §0 constraints: S2′ first, then S3′, then S4/S5. S1 and S2 become
+benchmarks, not decisions.**
+
+- **S2′ — Sysbox conformance (~2-3 days, do first).** In a **throwaway** WSL2 distro (never the
+  working one — installing Sysbox restarts `dockerd`): install Sysbox 0.7.1, run a devcontainer
+  with `--runtime=sysbox-runc`, start `dockerd` **inside** it unprivileged, then run the full
+  dind-compat battery with `socket-proxy` and `dind-authz` **disabled**, plus `e2e-escape.sh`.
+  *Pass:* battery green (Aspire, compose, Testcontainers, buildx, act), inner dockerd needs no
+  `--privileged`, and the escape test's device/host-kernel vectors fail at the runtime.
+  *Record:* which escape vectors Sysbox does **not** block, so the threat-bar claim stays honest.
+- **S3′ — engine host + IDE attach on all three platforms (~2-3 days).** Dedicated WSL2 distro
+  (Windows), Lima VM (macOS ARM64), native (Linux). Verify: `docker context` from the host OS,
+  JetBrains Gateway attach including the gateway-link discovery Huddle does by grepping backend
+  logs, VS Code attach, workspace mount performance and uid/gid behaviour under Sysbox's ID
+  mapping, and `huddle` CLI flows end to end.
+  *Pass:* identical UX on all three; no per-platform special-casing above the engine-host layer.
+- **S1 — `sbx` viability (Windows, ~2 days; now a benchmark).** Create a sandbox on a Win11 box; mount a real
   .NET repo; run the Aspire E2E; attach JetBrains Gateway and VS Code over SSH; add a domain
   to the policy while the sandbox runs and see if it takes effect live; capture what a blocked
   request looks like and whether anything logs it.
@@ -426,7 +522,28 @@ proof that a UI works.
 
 ---
 
-## 9. Recommendation
+## 9. Recommendation (constraint-driven — supersedes §9b)
+
+1. **Primary: Sysbox on a controlled Linux engine host per platform.** OSS, cross-platform,
+   Docker-native, gives unprivileged Docker-in-Docker, and meets the stated threat bar. Run
+   **S2′ then S3′** before committing.
+2. **Keep the egress chokepoint ours and host-side** (§5). This is plane-independent and is
+   where the product's value sits, so it should not be delegated to any backing layer's own
+   firewall.
+3. **Drop the MITM CA and allowlist on SNI/CONNECT** now that path rules and body logging are
+   not required (S5). This removes the CA-into-every-trust-store problem — the single most
+   recurring source of DinD breakage — from every plane at once.
+4. **Add Kata later, only where KVM exists**, if the claim needs to be "hypervisor boundary" on
+   native-Linux installs. Cheap to add precisely because Sysbox and Kata are both just a
+   `--runtime` on the same Docker orchestration.
+5. **Keep `sbx` as a measured yardstick**, not a dependency; revisit if the threat bar rises or
+   if Docker ships an OSS-usable policy surface.
+6. **Stop hardening the current model.** No further investment in socket-proxy policy or
+   authz-plugin coverage beyond keeping existing tests green.
+7. **Show the boundary in the portal per devcontainer** (userns vs hypervisor vs shared kernel)
+   so the claim is never stronger than the mechanism.
+
+## 9b. Recommendation from the initial survey (assumption-driven)
 
 1. **Adopt the axiom in §3** and restructure Huddle around a *pluggable compute plane* with a
    *host-side policy plane*. That is the durable decision; everything else is an
@@ -448,7 +565,8 @@ proof that a UI works.
 ## Sources
 
 - [Enhanced Container Isolation | Docker Docs](https://docs.docker.com/enterprise/security/hardened-desktop/enhanced-container-isolation/) · [how ECI works](https://docker.qubitpi.org/security/for-admins/hardened-desktop/enhanced-container-isolation/how-eci-works/) · [ECI limitations](https://docs.docker.com/enterprise/security/hardened-desktop/enhanced-container-isolation/limitations/)
-- [nestybox/sysbox](https://github.com/nestybox/sysbox) · [ID-mapped mounts issue #535](https://github.com/nestybox/sysbox/issues/535)
+- [nestybox/sysbox](https://github.com/nestybox/sysbox) (Apache-2.0; v0.7.1, 2026-07-31) · [distro compatibility](https://github.com/nestybox/sysbox/blob/master/docs/distro-compat.md) · [arch compatibility (arm64 since v0.5.0)](https://github.com/nestybox/sysbox/blob/master/docs/arch-compat.md) · [ID-mapped mounts issue #535](https://github.com/nestybox/sysbox/issues/535) · [WSL2 support issue #32](https://github.com/nestybox/sysbox/issues/32) · [KinD inside a Sysbox container](https://blog.nestybox.com/2022/01/10/kind-in-sysbox.html) · [Arm's Sysbox install guide](https://learn.arm.com/install-guides/sysbox/)
+- [Lima](https://lima-vm.io/docs/installation/) (macOS/Linux VMs, Apple Silicon)
 - [Docker Sandboxes docs](https://docs.docker.com/ai/sandboxes/) · [FAQ](https://docs.docker.com/ai/sandboxes/faq/) · [`sbx policy allow network`](https://docs.docker.com/reference/cli/sbx/policy/allow/network/) · [hands-on review (andrewlock.net)](https://andrewlock.net/running-ai-agents-safely-in-a-microvm-using-docker-sandbox/) · [sbx on Windows 11](https://www.ajeetraina.com/running-coding-agents-in-a-secure-microvm-on-windows-with-sbx/)
 - [Kata: how to use Kata with Docker](https://github.com/kata-containers/kata-containers/blob/main/docs/how-to/how-to-use-kata-with-docker.md) · [Docker alternative runtimes](https://docs.docker.com/engine/daemon/alternative-runtimes/) · [Kata Containers docs](https://katacontainers.io/docs/)
 - [Docker in gVisor](https://gvisor.dev/docs/tutorials/docker-in-gvisor/) · [gVisor docs](https://gvisor.dev/docs/)
