@@ -102,7 +102,11 @@ else
   alt="https://github.com/nestybox/sysbox/releases/download/v${SYSBOX_VERSION}/sysbox-ce_${SYSBOX_VERSION}.linux_${arch}.deb"
   curl -fsSL -o "$tmp/sysbox.deb" "$alt" || curl -fsSL -o "$tmp/sysbox.deb" "$url" \
     || fatal "could not download sysbox-ce ${SYSBOX_VERSION} for ${arch}"
-  apt-get install -y --no-install-recommends jq fuse rsync iptables lsb-release >/dev/null 2>&1 || true
+  # fuse3 explicitly: sysbox-fs mounts through fusermount3, and the package
+  # dependency only names 'fuse' (FUSE 2) on some distros. A missing or blocked
+  # fusermount3 shows up as "failed to pre-register with sysbox-fs".
+  apt-get install -y --no-install-recommends jq fuse3 fuse rsync iptables lsb-release >/dev/null 2>&1 || \
+    apt-get install -y --no-install-recommends jq fuse rsync iptables lsb-release >/dev/null 2>&1 || true
   DEBIAN_FRONTEND=noninteractive apt-get install -y "$tmp/sysbox.deb" || fatal "sysbox install failed"
   ok "sysbox installed"
 fi
@@ -152,5 +156,19 @@ docker network inspect bridge --format '  bridge subnet: {{range .IPAM.Config}}{
 grep -qE '"(bip|default-address-pool)"' /etc/docker/daemon.json 2>/dev/null \
   && ok "daemon.json pins bip/default-address-pool" \
   || info "  advisory: pin \"default-address-pool\" in /etc/docker/daemon.json if you see dc-net conflicts"
+
+# -- 7. fuse / apparmor advisory ----------------------------------------------
+# sysbox-fs virtualizes /proc and /sys through FUSE. If fusermount3 is missing or
+# AppArmor denies it, every container fails at
+#   "failed to pre-register with sysbox-fs: ... Initialization error"
+if command -v fusermount3 >/dev/null 2>&1; then
+  ok "fusermount3 present ($(command -v fusermount3))"
+else
+  no "fusermount3 MISSING - install fuse3; sysbox-fs cannot mount without it"
+fi
+if command -v aa-enabled >/dev/null 2>&1 && aa-enabled >/dev/null 2>&1; then
+  info "AppArmor is enabled; if containers fail to pre-register with sysbox-fs, check"
+  info "  journalctl -u sysbox-fs -n 50   (look for: fusermount3: mount failed: Permission denied)"
+fi
 
 info "engine host ready - start Huddle with HUDDLE_SYSBOX=1"

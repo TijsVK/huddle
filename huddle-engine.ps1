@@ -305,7 +305,12 @@ function Get-EngineDiagnostics {
         'echo "== huddle inspect ==" ; docker inspect huddle --format "state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} err={{.State.Error}} restarts={{.RestartCount}} policy={{.HostConfig.RestartPolicy.Name}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}" 2>&1',
         'echo "== huddle logs (tail 50) ==" ; docker logs --tail 50 huddle 2>&1',
         'echo "== dockerd journal (tail 30) ==" ; journalctl -u docker --no-pager -n 30 2>&1 | tail -30',
+        'echo "== sysbox units ==" ; systemctl is-active sysbox sysbox-mgr sysbox-fs 2>&1 | tr "\n" " " ; echo',
+        'echo "== sysbox-fs journal (tail 30) ==" ; journalctl -u sysbox-fs --no-pager -n 30 2>&1 | tail -30',
+        'echo "== sysbox-mgr journal (tail 30) ==" ; journalctl -u sysbox-mgr --no-pager -n 30 2>&1 | tail -30',
+        'echo "== sysbox smoke ==" ; docker run --rm --runtime=sysbox-runc alpine sh -c "head -1 /proc/self/uid_map" 2>&1 | tail -3',
         'echo "== kernel (oom?) ==" ; dmesg 2>/dev/null | tail -15',
+        'echo "== apparmor / fuse (sysbox-fs needs fusermount3) ==" ; aa-enabled 2>&1 | head -1 ; ls /sys/module/apparmor/parameters/enabled >/dev/null 2>&1 && cat /sys/module/apparmor/parameters/enabled ; which fusermount fusermount3 2>&1 ; ls -l /etc/apparmor.d/ 2>/dev/null | grep -i fuse ; sysctl kernel.apparmor_restrict_unprivileged_userns 2>&1 | head -1',
         'echo "== port 3000 ==" ; ss -tlnp 2>/dev/null | grep -E ":3000|:80 " ; echo "(empty = nothing listening)"',
         'echo "== memory ==" ; free -m | head -2'
     ) -join ' ; '
