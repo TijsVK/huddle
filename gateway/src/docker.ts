@@ -49,6 +49,10 @@ export const PRIVATE_DAEMON = DIND_ENABLED || SYSBOX_ENABLED;
 const SYSBOX_DOCKER_HOST = 'unix:///var/run/docker.sock';
 const SYSBOX_RUNTIME = process.env.HUDDLE_SYSBOX_RUNTIME ?? 'sysbox-runc';
 
+export function sysboxDockerDataVolume(containerName: string): string {
+  return `huddle-sysbox-docker-${containerName}`;
+}
+
 // ── IP → container name cache (used by proxy) ────────────────────────────────
 
 const CACHE_TTL_MS = 10_000;
@@ -464,6 +468,11 @@ export async function cleanupContainerNetwork(containerName: string): Promise<vo
   // DinD: ruim de private-daemon-sidecar + zijn volumes op. Idempotent en
   // veilig in beide modi (in klassiek bestaat de sidecar niet → 404 geslikt).
   await removeDindSidecar(containerName);
+  // Sysbox: het /var/lib/docker-volume van de in-container dockerd. Idempotent:
+  // in andere modi bestaat het niet (404 wordt geslikt).
+  try {
+    await dockerRequest('DELETE', `/volumes/${encodeURIComponent(sysboxDockerDataVolume(containerName))}?force=true`);
+  } catch {}
   const netName = `dc-net-${containerName}`;
   if (!(await networkExists(netName))) return;
   try { await disconnectNetwork(netName, 'huddle'); } catch {}
@@ -529,12 +538,25 @@ else
     getent group docker >/dev/null 2>&1 || groupadd -f docker
     id -nG vscode 2>/dev/null | grep -qw docker || usermod -aG docker vscode 2>/dev/null || true
     mkdir -p /var/log
-    env http_proxy="http://huddle:80" https_proxy="http://huddle:80" \\
-        HTTP_PROXY="http://huddle:80" HTTPS_PROXY="http://huddle:80" \\
-        no_proxy="localhost,127.0.0.1,::1,[::1],host.docker.internal" \\
-        NO_PROXY="localhost,127.0.0.1,::1,[::1],host.docker.internal" \\
-      nohup dockerd --group docker --host=unix:///var/run/docker.sock \\
-      >/var/log/huddle-dockerd.log 2>&1 &
+    # Supervisor i.p.v. een losse nohup: als dockerd omvalt (OOM, crash) komt hij
+    # terug zonder dat de developer de devcontainer moet herstarten.
+    cat > /usr/local/bin/huddle-dockerd-supervise <<'SUP'
+#!/bin/sh
+export http_proxy="http://huddle:80" https_proxy="http://huddle:80"
+export HTTP_PROXY="http://huddle:80" HTTPS_PROXY="http://huddle:80"
+export no_proxy="localhost,127.0.0.1,::1,[::1],host.docker.internal"
+export NO_PROXY="localhost,127.0.0.1,::1,[::1],host.docker.internal"
+while :; do
+  if [ -f /var/log/huddle-dockerd.log ] && [ "$(wc -c </var/log/huddle-dockerd.log)" -gt 20000000 ]; then
+    : > /var/log/huddle-dockerd.log
+  fi
+  dockerd --group docker --host=unix:///var/run/docker.sock >>/var/log/huddle-dockerd.log 2>&1
+  echo "[huddle] dockerd exited ($?), restarting in 3s" >>/var/log/huddle-dockerd.log
+  sleep 3
+done
+SUP
+    chmod +x /usr/local/bin/huddle-dockerd-supervise
+    setsid nohup /usr/local/bin/huddle-dockerd-supervise >/dev/null 2>&1 &
     for _i in $(seq 1 40); do
       docker -H unix:///var/run/docker.sock version >/dev/null 2>&1 && break
       sleep 1
@@ -1097,7 +1119,15 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
       Target: containerWorkspace,
     }]),
     ...(SYSBOX_ENABLED
-      ? []
+      ? [{
+          // Sysbox: geef de IN-container dockerd een eigen volume voor
+          // /var/lib/docker. Zonder dit schrijft hij in de writable layer van de
+          // devcontainer: overlay-op-overlay (langzamer) én elke geneste image
+          // blaast het snapshot/`docker commit` van de devcontainer op.
+          Type: 'volume' as const,
+          Source: sysboxDockerDataVolume(containerName),
+          Target: '/var/lib/docker',
+        }]
       : DIND_ENABLED
       ? [{
           // DinD: mount ONLY the OUTER socket dir (docker.sock = the filter). The

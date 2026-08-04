@@ -1,0 +1,174 @@
+# ──────────────────────────────────────────────────────────────────────────────
+#  Huddle engine host (Windows) — provision the WSL2 distro that runs dockerd
+#  with the Sysbox runtime, so every devcontainer can be a Sysbox sandbox with
+#  its own Docker inside.
+#
+#  Why a separate distro: Sysbox installs on the Docker *host*, and Docker
+#  Desktop's own distro is managed by Docker (its equivalent, Enhanced Container
+#  Isolation, is Business-tier and Desktop-only). So Huddle owns an engine distro.
+#
+#  Dot-source this from huddle.ps1, or run standalone:
+#     .\huddle-engine.ps1 -Setup     # create + provision the distro
+#     .\huddle-engine.ps1 -Check     # verify an existing engine
+#     .\huddle-engine.ps1 -Shell     # open a shell in the engine
+# ──────────────────────────────────────────────────────────────────────────────
+param(
+    [switch]$Setup,
+    [switch]$Check,
+    [switch]$Shell
+)
+
+$ErrorActionPreference = 'Stop'
+
+$ENGINE_DISTRO = if ($env:HUDDLE_ENGINE_DISTRO) { $env:HUDDLE_ENGINE_DISTRO } else { 'huddle-engine' }
+$ENGINE_BASE   = if ($env:HUDDLE_ENGINE_BASE)   { $env:HUDDLE_ENGINE_BASE   } else { 'Ubuntu-24.04' }
+
+function Write-Step { param([string]$Msg) Write-Host "== $Msg" -ForegroundColor Cyan }
+function Write-Ok   { param([string]$Msg) Write-Host "  [ok] $Msg" -ForegroundColor Green }
+function Write-Bad  { param([string]$Msg) Write-Host "  [--] $Msg" -ForegroundColor Red }
+
+function Test-Wsl {
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+        Write-Bad "wsl.exe not found. Install WSL2: 'wsl --install' (needs Windows 10 21H2+ / Windows 11)."
+        return $false
+    }
+    return $true
+}
+
+# WSL writes UTF-16 with NULs; strip them so -match/-contains behave.
+function Get-WslDistros {
+    (& wsl.exe -l -q 2>$null) -replace "`0", '' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+}
+
+function Test-HuddleEngine {
+    if (-not (Test-Wsl)) { return $false }
+    return ((Get-WslDistros) -contains $ENGINE_DISTRO)
+}
+
+# Run a command inside the engine distro as root.
+function Invoke-Engine {
+    param([Parameter(Mandatory)][string]$Command, [switch]$AsUser)
+    $userArgs = if ($AsUser) { @() } else { @('-u', 'root') }
+    & wsl.exe -d $ENGINE_DISTRO @userArgs -- bash -lc $Command
+    return $LASTEXITCODE
+}
+
+# Windows path -> path inside the distro (C:\src\x -> /mnt/c/src/x).
+function ConvertTo-EnginePath {
+    param([Parameter(Mandatory)][string]$WindowsPath)
+    $full = (Resolve-Path -LiteralPath $WindowsPath).Path
+    $drive = $full.Substring(0, 1).ToLower()
+    $rest = $full.Substring(2) -replace '\\', '/'
+    return "/mnt/$drive$rest"
+}
+
+function New-HuddleEngineDistro {
+    Write-Step "creating WSL2 distro '$ENGINE_DISTRO' from $ENGINE_BASE"
+    # WSL 2.4+ can install a named instance without launching it. Older builds
+    # need a manual --import of a rootfs tarball; we surface that clearly.
+    & wsl.exe --install $ENGINE_BASE --name $ENGINE_DISTRO --no-launch
+    if ($LASTEXITCODE -ne 0) {
+        Write-Bad "'wsl --install $ENGINE_BASE --name $ENGINE_DISTRO --no-launch' failed (needs WSL 2.4+)."
+        Write-Host "  Fallback: download an Ubuntu 24.04 rootfs and import it:" -ForegroundColor Yellow
+        Write-Host "    wsl --import $ENGINE_DISTRO C:\wsl\$ENGINE_DISTRO ubuntu-24.04-rootfs.tar.gz" -ForegroundColor Yellow
+        return $false
+    }
+    Write-Ok "distro created"
+    return $true
+}
+
+function Set-EngineWslConf {
+    Write-Step "enabling systemd in '$ENGINE_DISTRO' (Sysbox ships systemd units)"
+    # Heredoc via bash so we don't fight PowerShell encoding/BOM issues.
+    $conf = @'
+cat > /etc/wsl.conf <<'CONF'
+[boot]
+systemd=true
+
+[interop]
+enabled=true
+appendWindowsPath=false
+CONF
+'@
+    if ((Invoke-Engine -Command $conf) -ne 0) { Write-Bad "could not write /etc/wsl.conf"; return $false }
+    & wsl.exe --terminate $ENGINE_DISTRO | Out-Null
+    Write-Ok "systemd enabled (distro terminated so it restarts with systemd)"
+    return $true
+}
+
+function Install-EngineStack {
+    param([Parameter(Mandatory)][string]$RepoRoot)
+    $enginePath = ConvertTo-EnginePath $RepoRoot
+    Write-Step "provisioning docker + sysbox inside '$ENGINE_DISTRO'"
+    Write-Host "  (repo visible in the distro at $enginePath)" -ForegroundColor DarkGray
+    $rc = Invoke-Engine -Command "bash '$enginePath/scripts/huddle-engine-install.sh'"
+    if ($rc -ne 0) { Write-Bad "engine provisioning failed (exit $rc)"; return $false }
+    Write-Ok "engine provisioned"
+    return $true
+}
+
+function Test-EngineReady {
+    if (-not (Test-HuddleEngine)) { Write-Bad "distro '$ENGINE_DISTRO' does not exist — run with -Setup"; return $false }
+    $rc = Invoke-Engine -Command "bash -c 'command -v sysbox-runc >/dev/null && docker info --format \"{{json .Runtimes}}\" | grep -q sysbox-runc'"
+    if ($rc -ne 0) { Write-Bad "engine exists but sysbox-runc is not registered — run with -Setup"; return $false }
+    Write-Ok "engine '$ENGINE_DISTRO' ready (docker + sysbox-runc)"
+    return $true
+}
+
+# Full setup: distro -> systemd -> docker+sysbox -> verify.
+function Initialize-HuddleEngine {
+    param([string]$RepoRoot = $PSScriptRoot)
+    if (-not (Test-Wsl)) { return $false }
+    if (-not (Test-HuddleEngine)) {
+        if (-not (New-HuddleEngineDistro)) { return $false }
+        if (-not (Set-EngineWslConf)) { return $false }
+    } else {
+        Write-Ok "distro '$ENGINE_DISTRO' already exists"
+        Set-EngineWslConf | Out-Null
+    }
+    if (-not (Install-EngineStack -RepoRoot $RepoRoot)) { return $false }
+    return (Test-EngineReady)
+}
+
+# Start Huddle ON the engine host, in Sysbox mode. Everything (gateway image
+# build, `huddle init`, devcontainers) runs inside the distro; the portal is
+# reachable from Windows on localhost via WSL's port forwarding.
+function Start-HuddleOnEngine {
+    param(
+        [string]$RepoRoot = $PSScriptRoot,
+        [int]$Port = 3000,
+        [string]$Image = 'huddle',
+        [switch]$SkipBuild
+    )
+    if (-not (Test-EngineReady)) { return $false }
+    $repo = ConvertTo-EnginePath $RepoRoot
+
+    if (-not $SkipBuild) {
+        Write-Step "building the gateway image inside the engine"
+        if ((Invoke-Engine -Command "cd '$repo' && docker build -t $Image ./gateway") -ne 0) {
+            Write-Bad "gateway image build failed"; return $false
+        }
+        Write-Ok "gateway image '$Image' built"
+
+        Write-Step "building the CLI inside the engine"
+        if ((Invoke-Engine -Command "cd '$repo/cli' && npm install --no-audit --no-fund && npx tsc") -ne 0) {
+            Write-Bad "CLI build failed"; return $false
+        }
+        Write-Ok "CLI built"
+    }
+
+    Write-Step "huddle init (HUDDLE_SYSBOX=1) on the engine"
+    $initCmd = "cd '$repo' && HUDDLE_SYSBOX=1 HUDDLE_IMAGE=$Image HUDDLE_NO_PULL=1 HUDDLE_PORT=$Port node cli/dist/index.js init"
+    if ((Invoke-Engine -Command $initCmd) -ne 0) { Write-Bad "'huddle init' failed on the engine"; return $false }
+
+    Write-Ok "Huddle running in Sysbox mode — portal: http://localhost:$Port"
+    Write-Host "  Devcontainers live on the engine's docker daemon. To attach an IDE:" -ForegroundColor DarkGray
+    Write-Host "    VS Code : Remote-WSL into '$ENGINE_DISTRO', then 'Dev Containers: Attach to Running Container'" -ForegroundColor DarkGray
+    Write-Host "    JetBrains: Gateway -> Docker server -> WSL/SSH pointing at '$ENGINE_DISTRO'" -ForegroundColor DarkGray
+    return $true
+}
+
+# Standalone entry points.
+if ($Setup) { if (Initialize-HuddleEngine -RepoRoot $PSScriptRoot) { exit 0 } else { exit 1 } }
+if ($Check) { if (Test-EngineReady) { exit 0 } else { exit 1 } }
+if ($Shell) { & wsl.exe -d $ENGINE_DISTRO; exit $LASTEXITCODE }

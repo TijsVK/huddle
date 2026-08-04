@@ -6,6 +6,15 @@ $HUDDLE_CONTAINER = "huddle"
 $HUDDLE_IMAGE     = "huddle"
 $HUDDLE_PORT      = 3000
 
+# Sysbox-modus (experiment): elke devcontainer draait onder sysbox-runc met een
+# EIGEN dockerd erin — geen socket-proxy, geen dind-sidecar, geen authz-plugin.
+# Op Windows kan dat niet op de Docker Desktop-VM: sysbox moet op de docker-HOST
+# geinstalleerd worden, dus Huddle krijgt zijn eigen WSL2-distro als engine host.
+# Zet HUDDLE_SYSBOX=1 (env) of kies menu-optie 6.
+$SYSBOX_MODE = ($env:HUDDLE_SYSBOX -eq '1')
+$engineHelper = Join-Path $PSScriptRoot 'huddle-engine.ps1'
+if (Test-Path $engineHelper) { . $engineHelper }
+
 # Per-IDE base images. Elke IDE heeft een eigen base-devimage-<ide>/ folder met
 # een Dockerfile en draagt LABEL com.devcontainer.ide=<ide>. Snapshots inheriten
 # datzelfde label zodat de spawn-flow ze per IDE kan filteren.
@@ -102,12 +111,16 @@ function Write-Status {
 function Show-Menu {
     Write-Banner
     Write-Status
+    if ($SYSBOX_MODE) {
+        Write-Host "   modus: SYSBOX (engine host '$(if ($env:HUDDLE_ENGINE_DISTRO) { $env:HUDDLE_ENGINE_DISTRO } else { 'huddle-engine' })')" -ForegroundColor Yellow
+    }
     Write-Host "  -----------------------------------------" -ForegroundColor DarkGray
     Write-Host "   1  Snapshot maken van draaiende container" -ForegroundColor White
     Write-Host "   2  Devcontainer starten (IDE -> standaard of snapshot)" -ForegroundColor White
     Write-Host "   3  Base image bouwen per IDE (of alle parallel)" -ForegroundColor White
     Write-Host "   4  Huddle bouwen en herinitialiseren (CLI, no-pull)" -ForegroundColor White
     Write-Host "   5  Tests draaien (unit + e2e)" -ForegroundColor White
+    Write-Host "   6  Sysbox engine host opzetten/controleren (WSL2)" -ForegroundColor White
     Write-Host "  -----------------------------------------" -ForegroundColor DarkGray
     Write-Host "   0  Afsluiten" -ForegroundColor DarkGray
     Write-Host ""
@@ -168,6 +181,18 @@ function Install-HuddleCli {
 # `huddle init`; dit script levert alleen de lokaal gebouwde image aan via
 # HUDDLE_IMAGE + HUDDLE_NO_PULL zodat er niets uit het register gepulld wordt.
 function Initialize-Huddle {
+    # Sysbox: alles (image-build, CLI, gateway, devcontainers) draait OP de engine
+    # host (WSL2-distro), niet op Docker Desktop. De portal blijft op
+    # http://localhost:<port> bereikbaar via WSL-portforwarding.
+    if ($SYSBOX_MODE) {
+        if (-not (Get-Command Start-HuddleOnEngine -ErrorAction SilentlyContinue)) {
+            Write-Host "  [FAIL] huddle-engine.ps1 niet gevonden naast huddle.ps1." -ForegroundColor Red
+            return $false
+        }
+        Write-Host "  Sysbox-modus: initialiseren op de engine host..." -ForegroundColor DarkCyan
+        return (Start-HuddleOnEngine -RepoRoot $PSScriptRoot -Port $HUDDLE_PORT -Image $HUDDLE_IMAGE)
+    }
+
     if (-not (Get-Command huddle -ErrorAction SilentlyContinue)) {
         Write-Host "  [FAIL] 'huddle' CLI niet gevonden. Kies de reset-optie 'CLI' om hem te installeren." -ForegroundColor Red
         return $false
@@ -581,6 +606,18 @@ while ($running) {
         '3' { Build-BaseImage;    Read-Host "`n  Druk Enter om terug te gaan" }
         '4' { Build-HuddleImage; if ($LASTEXITCODE -eq 0) { Initialize-Huddle | Out-Null }; Read-Host "`n  Druk Enter om terug te gaan" }
         '5' { Invoke-Tests;       Read-Host "`n  Druk Enter om terug te gaan" }
+        '6' {
+            if (Get-Command Initialize-HuddleEngine -ErrorAction SilentlyContinue) {
+                if (Initialize-HuddleEngine -RepoRoot $PSScriptRoot) {
+                    $SYSBOX_MODE = $true
+                    $env:HUDDLE_SYSBOX = '1'
+                    Write-Host "`n  Engine host klaar. Kies 4 om Huddle in sysbox-modus te (her)initialiseren." -ForegroundColor Green
+                }
+            } else {
+                Write-Host "  huddle-engine.ps1 niet gevonden naast huddle.ps1." -ForegroundColor Red
+            }
+            Read-Host "`n  Druk Enter om terug te gaan"
+        }
         '0' { $running = $false }
         default { Write-Host "  Ongeldige keuze." -ForegroundColor Red; Start-Sleep -Seconds 1 }
     }

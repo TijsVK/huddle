@@ -19,6 +19,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
+# Sysbox-modus (HUDDLE_SYSBOX=1): de devcontainer draait onder sysbox-runc en heeft
+# een EIGEN dockerd nodig, niet alleen de CLI. Achter een build-arg zodat klassieke
+# en DinD-images slank blijven: `--build-arg HUDDLE_DOCKER_ENGINE=1`.
+ARG HUDDLE_DOCKER_ENGINE=0
+RUN if [ "$HUDDLE_DOCKER_ENGINE" = "1" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends docker-ce containerd.io \
+        && rm -rf /var/lib/apt/lists/* \
+        && rm -f /etc/init.d/docker \
+        && echo "docker engine baked in (sysbox mode)"; \
+    fi
+
 # Node.js 24 (vereist voor claude-code, codex en copilot CLIs)
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
