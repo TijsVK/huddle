@@ -18,7 +18,11 @@ param(
     [switch]$Shell
 )
 
-$ErrorActionPreference = 'Stop'
+# NB: do NOT set $ErrorActionPreference here. huddle.ps1 dot-sources this file,
+# so a top-level assignment lands in ITS scope, and then any native command that
+# writes to stderr (e.g. `docker info` printing "WARNING: daemon is not using the
+# default seccomp profile") becomes a terminating NativeCommandError. It is set
+# per standalone entry point at the bottom instead.
 
 $ENGINE_DISTRO = if ($env:HUDDLE_ENGINE_DISTRO) { $env:HUDDLE_ENGINE_DISTRO } else { 'huddle-engine' }
 $ENGINE_BASE   = if ($env:HUDDLE_ENGINE_BASE)   { $env:HUDDLE_ENGINE_BASE   } else { 'Ubuntu-24.04' }
@@ -170,7 +174,9 @@ function Start-HuddleOnEngine {
     return $true
 }
 
-# Standalone entry points.
+# Standalone entry points. Strict mode only applies when this script is RUN,
+# not when huddle.ps1 dot-sources it.
+if ($Setup -or $Check -or $Shell) { $ErrorActionPreference = 'Stop' }
 if ($Setup) { if (Initialize-HuddleEngine -RepoRoot $PSScriptRoot) { exit 0 } else { exit 1 } }
 if ($Check) { if (Test-EngineReady) { exit 0 } else { exit 1 } }
 if ($Shell) { & wsl.exe -d $ENGINE_DISTRO; exit $LASTEXITCODE }
