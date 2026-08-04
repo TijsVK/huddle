@@ -400,15 +400,25 @@ function Open-EngineInVsCode {
 }
 
 function Show-AttachHelp {
-    Write-Step "attaching an IDE to a devcontainer on '$ENGINE_DISTRO'"
-    Invoke-Engine -Command 'docker ps --format "  {{.Names}}  ({{.Status}})"' | Out-Null
+    Write-Step "what an IDE can attach to on '$ENGINE_DISTRO'"
+    $running = Invoke-Engine -Quiet -Command "docker ps --format '{{.Names}}' | grep -v '^huddle$' | grep -q ."
+    Invoke-Engine -Command 'echo "  running:"; docker ps --format "    {{.Names}}  ({{.Status}})"; echo "  not running:"; docker ps -a --filter status=exited --filter status=created --format "    {{.Names}}  ({{.Status}})"' | Out-Null
     Write-Host ""
+    if ($running -ne 0) {
+        Write-Bad "no devcontainer is RUNNING - that is why the attach list is empty."
+        Write-Host "  VS Code can only attach to running containers. Start one from the portal," -ForegroundColor Yellow
+        Write-Host "  and if it exits immediately check:  .\huddle-engine.ps1 -Diagnose" -ForegroundColor Yellow
+        Write-Host ""
+    }
     Write-Host "  VS Code:" -ForegroundColor White
-    Write-Host "    .\huddle-engine.ps1 -Code        (or: F1 -> WSL: Connect to WSL using Distro -> $ENGINE_DISTRO)" -ForegroundColor DarkGray
+    Write-Host "    .\huddle-engine.ps1 -Code    (or F1 -> WSL: Connect to WSL using Distro -> $ENGINE_DISTRO)" -ForegroundColor DarkGray
     Write-Host "    then F1 -> Dev Containers: Attach to Running Container" -ForegroundColor DarkGray
+    Write-Host "    The window must say 'WSL: $ENGINE_DISTRO' bottom-left; a plain Windows window" -ForegroundColor DarkGray
+    Write-Host "    talks to Docker Desktop and will always be empty." -ForegroundColor DarkGray
     Write-Host "  JetBrains Gateway:" -ForegroundColor White
-    Write-Host "    Gateway -> Dev Containers -> '...' -> add a Docker server on WSL ($ENGINE_DISTRO)" -ForegroundColor DarkGray
-    Write-Host "  Why: the IDE on Windows talks to Docker Desktop; these containers live on the engine." -ForegroundColor DarkGray
+    Write-Host "    Gateway -> Dev Containers -> '...' -> Docker server on WSL ($ENGINE_DISTRO)" -ForegroundColor DarkGray
+    Write-Host "  Docker access for the user VS Code runs as:" -ForegroundColor White
+    Invoke-Engine -AsUser -Command 'echo "    user=$(whoami)"; docker ps >/dev/null 2>&1 && echo "    docker access: OK" || echo "    docker access: DENIED - run: sudo usermod -aG docker $(whoami), then reopen the WSL session"' | Out-Null
 }
 
 # Standalone entry points. Strict mode only applies when this script is RUN,

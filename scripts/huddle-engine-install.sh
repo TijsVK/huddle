@@ -111,6 +111,25 @@ else
   fi
 fi
 
+# -- 2d. docker group for the distro's default user ----------------------------
+# VS Code (Remote-WSL) runs as the distro's default user, not root. If that user
+# cannot read /var/run/docker.sock, the Dev Containers extension silently lists
+# no containers to attach to.
+DEFAULT_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1)
+if [ -n "$DEFAULT_USER" ]; then
+  if id -nG "$DEFAULT_USER" 2>/dev/null | grep -qw docker; then
+    ok "user '$DEFAULT_USER' is in the docker group"
+  elif [ $CHECK_ONLY -eq 1 ]; then
+    no "user '$DEFAULT_USER' is NOT in the docker group (VS Code attach will show nothing)"
+  else
+    groupadd -f docker
+    usermod -aG docker "$DEFAULT_USER"
+    ok "added '$DEFAULT_USER' to the docker group (re-open the WSL session to pick it up)"
+  fi
+else
+  info "no uid-1000 user in this distro; VS Code will connect as root (docker access is fine)"
+fi
+
 # -- 3. sysbox ----------------------------------------------------------------
 info "checking sysbox"
 if command -v sysbox-runc >/dev/null 2>&1 && systemctl is-active --quiet sysbox 2>/dev/null; then
