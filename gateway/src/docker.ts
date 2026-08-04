@@ -32,6 +32,23 @@ const RUNTIME_SECURITY_OPT: string[] = CONTAINER_RUNTIME === 'podman' ? ['label=
 // werkend. Standaard uit → klassiek socket-proxy-model.
 export const DIND_ENABLED = process.env.HUDDLE_DIND === '1';
 
+// Experiment: Sysbox. Met HUDDLE_SYSBOX=1 draait de devcontainer zelf onder de
+// sysbox-runc runtime (user-namespace + gevirtualiseerde /proc en /sys) en start
+// dockerd BINNEN de devcontainer — geen sidecar, geen authz-plugin, geen
+// socket-proxy. De egress-firewall (dc-net --internal + proxy + CA) blijft
+// ongewijzigd. Voordeel t.o.v. DinD: geen gedeelde netns-truc nodig, want de
+// geneste published ports landen per definitie op de loopback van de
+// devcontainer zelf (wat Aspire's DCP verwacht).
+export const SYSBOX_ENABLED = process.env.HUDDLE_SYSBOX === '1';
+
+// Beide modi geven de devcontainer een EIGEN daemon: geen socket-proxy in het pad
+// en geneste containers hebben de client-side proxy-config nodig.
+export const PRIVATE_DAEMON = DIND_ENABLED || SYSBOX_ENABLED;
+
+// In sysbox-modus is de socket de echte in-container dockerd-socket.
+const SYSBOX_DOCKER_HOST = 'unix:///var/run/docker.sock';
+const SYSBOX_RUNTIME = process.env.HUDDLE_SYSBOX_RUNTIME ?? 'sysbox-runc';
+
 // ── IP → container name cache (used by proxy) ────────────────────────────────
 
 const CACHE_TTL_MS = 10_000;
@@ -168,7 +185,7 @@ iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A OUTPUT -p tcp -d "$HUDDLE_IP" -j ACCEPT
 iptables -A OUTPUT -p tcp -j DROP
 
-${dindClientProxyConfig(DIND_ENABLED)}
+${dindClientProxyConfig(PRIVATE_DAEMON)}
 `;
   try {
     const exec = await dockerRequest('POST', `/containers/${encodeURIComponent(containerId)}/exec`, {
@@ -486,9 +503,53 @@ done`;
 // in DinD-modus de private-daemon-socket in /var/run/dind. Gedeeld tussen het
 // JetBrains- en het VS Code-startscript.
 function dockerSockSymlink(sockPath: string): string {
+  // In sysbox-modus IS /var/run/docker.sock de echte socket van de in-container
+  // dockerd; een symlink naar zichzelf zou hem slopen.
+  if (sockPath === '/var/run/docker.sock') {
+    return `# Sysbox: /var/run/docker.sock is de echte socket van de in-container dockerd.`;
+  }
   return `# Docker-toegang loopt via ${sockPath} (zie DOCKER_HOST). Symlink het
 # defaultpad voor tools die DOCKER_HOST negeren.
 ln -sfn ${sockPath} /var/run/docker.sock 2>/dev/null || true`;
+}
+
+// Sysbox: start dockerd BINNEN de devcontainer. Dat kan onder sysbox-runc zonder
+// --privileged, want de user-namespace + gevirtualiseerde /proc en /sys geven
+// dockerd precies genoeg om te werken zonder host-toegang. De daemon erft de
+// proxy-env, zodat ook zijn image-pulls door de Huddle-firewall gaan, en de
+// MITM-CA is op dat moment al in de trust store geïnstalleerd (anders faalt elke
+// pull met x509: unknown authority).
+function sysboxDockerdBootstrap(enabled: boolean): string {
+  if (!enabled) return '';
+  return `# Sysbox: eigen dockerd in de devcontainer (geen sidecar, geen authz-plugin).
+if ! command -v dockerd >/dev/null 2>&1; then
+  echo "[huddle] WARNING: dockerd not in image; sysbox mode needs docker-ce in the devcontainer image" >&2
+else
+  if ! docker -H unix:///var/run/docker.sock version >/dev/null 2>&1; then
+    getent group docker >/dev/null 2>&1 || groupadd -f docker
+    id -nG vscode 2>/dev/null | grep -qw docker || usermod -aG docker vscode 2>/dev/null || true
+    mkdir -p /var/log
+    env http_proxy="http://huddle:80" https_proxy="http://huddle:80" \\
+        HTTP_PROXY="http://huddle:80" HTTPS_PROXY="http://huddle:80" \\
+        no_proxy="localhost,127.0.0.1,::1,[::1],host.docker.internal" \\
+        NO_PROXY="localhost,127.0.0.1,::1,[::1],host.docker.internal" \\
+      nohup dockerd --group docker --host=unix:///var/run/docker.sock \\
+      >/var/log/huddle-dockerd.log 2>&1 &
+    for _i in $(seq 1 40); do
+      docker -H unix:///var/run/docker.sock version >/dev/null 2>&1 && break
+      sleep 1
+    done
+  fi
+  chmod 0660 /var/run/docker.sock 2>/dev/null || true
+  chgrp docker /var/run/docker.sock 2>/dev/null || true
+  # dockerd heeft nu docker0 aangemaakt; herhaal de bridge-uitzonderingen zodat
+  # published ports van geneste containers vanuit de devcontainer bereikbaar zijn
+  # (idempotent — zelfde regels als in de DinD-modus).
+  for _brif in docker0 br+; do
+    iptables -C OUTPUT -o "$_brif" -j ACCEPT 2>/dev/null || iptables -I OUTPUT 1 -o "$_brif" -j ACCEPT 2>/dev/null || true
+    iptables -t nat -C OUTPUT -o "$_brif" -j RETURN 2>/dev/null || iptables -t nat -I OUTPUT 1 -o "$_brif" -j RETURN 2>/dev/null || true
+  done
+fi`;
 }
 
 // DinD: laat élke geneste `docker run`/compose/build proxy-env erven zodat hun
@@ -640,7 +701,7 @@ iptables -C OUTPUT -o lo -j ACCEPT 2>/dev/null || iptables -A OUTPUT -o lo -j AC
 iptables -C OUTPUT -p tcp -d "$HUDDLE_IP" -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p tcp -d "$HUDDLE_IP" -j ACCEPT
 iptables -C OUTPUT -p tcp -j DROP 2>/dev/null || iptables -A OUTPUT -p tcp -j DROP
 
-${dindClientProxyConfig(DIND_ENABLED)}
+${dindClientProxyConfig(PRIVATE_DAEMON)}
 
 # Installeer huddle's MITM-CA in de system trust store + zet env-vars voor
 # tools die niet uit de system store lezen (node).
@@ -656,6 +717,8 @@ chmod 644 /etc/profile.d/99-huddle-ca.sh
 # dotnet run inherits it. Fixes the Aspire dashboard gRPC UntrustedRoot (dev-cert).
 printf 'export ASPIRE_ALLOW_UNSECURED_TRANSPORT=true\\n' > /etc/profile.d/99-huddle-aspire.sh
 chmod 644 /etc/profile.d/99-huddle-aspire.sh
+
+${sysboxDockerdBootstrap(SYSBOX_ENABLED)}
 
 ${IDE_CRED_SCRUB}
 
@@ -780,7 +843,7 @@ iptables -C OUTPUT -o lo -j ACCEPT 2>/dev/null || iptables -A OUTPUT -o lo -j AC
 iptables -C OUTPUT -p tcp -d "$HUDDLE_IP" -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p tcp -d "$HUDDLE_IP" -j ACCEPT
 iptables -C OUTPUT -p tcp -j DROP 2>/dev/null || iptables -A OUTPUT -p tcp -j DROP
 
-${dindClientProxyConfig(DIND_ENABLED)}
+${dindClientProxyConfig(PRIVATE_DAEMON)}
 
 # Installeer huddle's MITM-CA in de system trust store + zet env-vars voor
 # tools die niet uit de system store lezen (node, java).
@@ -796,6 +859,8 @@ chmod 644 /etc/profile.d/99-huddle-ca.sh
 # dotnet run inherits it. Fixes the Aspire dashboard gRPC UntrustedRoot (dev-cert).
 printf 'export ASPIRE_ALLOW_UNSECURED_TRANSPORT=true\\n' > /etc/profile.d/99-huddle-aspire.sh
 chmod 644 /etc/profile.d/99-huddle-aspire.sh
+
+${sysboxDockerdBootstrap(SYSBOX_ENABLED)}
 
 ${IDE_CRED_SCRUB}
 
@@ -958,6 +1023,8 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
   //              mount hem op /var/run/dind).
   if (DIND_ENABLED) {
     await ensureDindSockVolume(containerName);
+  } else if (SYSBOX_ENABLED) {
+    // Sysbox: dockerd draait IN de devcontainer; niets voor te bereiden.
   } else {
     await createContainerProxy(containerName, SOCKET_DIR);
   }
@@ -1004,7 +1071,7 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
     // gemounte directory /var/run/huddle. DinD: de private-daemon-socket in de
     // gedeelde volume /var/run/dind. Het config-script legt in beide gevallen ook
     // een symlink op /var/run/docker.sock voor tools die het defaultpad hardcoden.
-    `DOCKER_HOST=${DIND_ENABLED ? DIND_DOCKER_HOST : 'unix:///var/run/huddle/docker.sock'}`,
+    `DOCKER_HOST=${SYSBOX_ENABLED ? SYSBOX_DOCKER_HOST : DIND_ENABLED ? DIND_DOCKER_HOST : 'unix:///var/run/huddle/docker.sock'}`,
     ...(isVscode ? [] : [
       'DEVCONTAINER_CONFIG_PATH=/.jbdevcontainer/config/JetBrains/host-config.json',
       'XDG_DATA_HOME=/.jbdevcontainer/data',
@@ -1029,7 +1096,9 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
       Source: effectiveSource,
       Target: containerWorkspace,
     }]),
-    ...(DIND_ENABLED
+    ...(SYSBOX_ENABLED
+      ? []
+      : DIND_ENABLED
       ? [{
           // DinD: mount ONLY the OUTER socket dir (docker.sock = the filter). The
           // sidecar's inner.sock lives in a SEPARATE dir that is NOT mounted here,
@@ -1068,6 +1137,7 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
       Mounts: mounts,
       NetworkMode: netName,
       CapAdd: ['NET_ADMIN'],
+      ...(SYSBOX_ENABLED ? { Runtime: SYSBOX_RUNTIME } : {}),
       ...(RUNTIME_SECURITY_OPT.length ? { SecurityOpt: RUNTIME_SECURITY_OPT } : {}),
       Memory: parseMemoryBytes(params.memory || getSetting('defaultMemory') || '8g'),
       CpuQuota: parseCpuQuota(params.cpus || getSetting('defaultCpus') || '2'),
@@ -1100,7 +1170,7 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
   const containerPaths = folderMounts.map(m => m.Target);
   const seedScript = buildFolderMappingSeedScript(containerPaths);
 
-  const dockerSockPath = DIND_ENABLED ? DIND_SOCKET_PATH : '/var/run/huddle/docker.sock';
+  const dockerSockPath = SYSBOX_ENABLED ? '/var/run/docker.sock' : DIND_ENABLED ? DIND_SOCKET_PATH : '/var/run/huddle/docker.sock';
 
   // Run config script via exec — VS Code-variant zonder JB host-config/backend.
   const script = isVscode

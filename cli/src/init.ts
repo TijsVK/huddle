@@ -146,6 +146,15 @@ export async function runInit(opts: InitOptions, images: ResolvedImages): Promis
     }
   }
 
+  // Experiment: Sysbox. Met HUDDLE_SYSBOX=1 draait elke devcontainer onder
+  // sysbox-runc met een EIGEN dockerd erin — geen sidecar, geen authz-plugin,
+  // geen socket-proxy. De egress-firewall blijft ongewijzigd.
+  if (process.env.HUDDLE_SYSBOX === '1') {
+    dindFlags += ' -e HUDDLE_SYSBOX=1';
+    if (process.env.HUDDLE_SYSBOX_RUNTIME) dindFlags += ` -e HUDDLE_SYSBOX_RUNTIME=${process.env.HUDDLE_SYSBOX_RUNTIME}`;
+    console.log(yellow('Sysbox mode active (HUDDLE_SYSBOX=1): each devcontainer runs under sysbox-runc with its own in-container dockerd.'));
+  }
+
   // Operator-token voor de control-plane-auth. Hergebruik het token uit de
   // config (zodat een bestaande browser-sessie/CLI blijft werken over re-inits),
   // anders genereer er één. We geven het aan de gateway mee via env én bewaren
