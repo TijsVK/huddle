@@ -155,7 +155,41 @@ function Initialize-HuddleEngine {
         Set-EngineWslConf | Out-Null
     }
     if (-not (Install-EngineStack -RepoRoot $RepoRoot)) { return $false }
+    Start-EngineKeepalive | Out-Null
     return (Test-EngineReady)
+}
+
+
+# WSL tears a distro down once no client is attached to it. huddle.ps1 drives the
+# engine with short-lived `wsl.exe` calls, so seconds after `huddle init` returns
+# the distro (systemd, dockerd, and the gateway with it) is stopped again - the
+# "Huddle starts, then exits" symptom. The next wsl.exe call boots it back up,
+# which is why the log shows the gateway starting over and over and why dockerd's
+# journal shows repeated "Starting docker.service".
+#
+# A hidden, long-lived client keeps the distro alive. It is idempotent and costs
+# one sleeping process.
+function Start-EngineKeepalive {
+    $marker = 'huddle-engine-keepalive'
+    if ((Invoke-Engine -Quiet -Command "pgrep -f $marker >/dev/null 2>&1") -eq 0) {
+        Write-Ok "keepalive already running (distro stays up)"
+        return $true
+    }
+    Start-Process -FilePath 'wsl.exe' `
+        -ArgumentList @('-d', $ENGINE_DISTRO, '-u', 'root', '--', 'bash', '-c', "exec -a $marker sleep infinity") `
+        -WindowStyle Hidden | Out-Null
+    Start-Sleep -Seconds 2
+    if ((Invoke-Engine -Quiet -Command "pgrep -f $marker >/dev/null 2>&1") -eq 0) {
+        Write-Ok "keepalive started - '$ENGINE_DISTRO' will stay up while you work"
+        return $true
+    }
+    Write-Bad "could not start the keepalive; the distro may stop when idle (huddle will restart with docker)"
+    return $false
+}
+
+function Stop-EngineKeepalive {
+    Invoke-Engine -Quiet -Command "pkill -f huddle-engine-keepalive" | Out-Null
+    Write-Ok "keepalive stopped"
 }
 
 # Start Huddle ON the engine host, in Sysbox mode. Everything (gateway image
@@ -169,6 +203,7 @@ function Start-HuddleOnEngine {
         [switch]$SkipBuild
     )
     if (-not (Test-EngineReady)) { return $false }
+    Start-EngineKeepalive | Out-Null
     $repo = ConvertTo-EnginePath $RepoRoot
 
     if (-not $SkipBuild) {
