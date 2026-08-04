@@ -1,0 +1,11 @@
+# Shell scripts must stay LF: they are executed inside Linux containers and the
+# WSL2 engine host. With git's autocrlf on Windows a CRLF checkout makes bash
+# fail with "$'\r': command not found" and "set: pipefail: invalid option name".
+*.sh text eol=lf
+*.bash text eol=lf
+Dockerfile* text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# PowerShell stays CRLF (Windows-native tooling).
+*.ps1 text eol=crlf

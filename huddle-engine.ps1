@@ -83,18 +83,13 @@ function New-HuddleEngineDistro {
 
 function Set-EngineWslConf {
     Write-Step "enabling systemd in '$ENGINE_DISTRO' (Sysbox ships systemd units)"
-    # Heredoc via bash so we don't fight PowerShell encoding/BOM issues.
-    $conf = @'
-cat > /etc/wsl.conf <<'CONF'
-[boot]
-systemd=true
-
-[interop]
-enabled=true
-appendWindowsPath=false
-CONF
-'@
-    if ((Invoke-Engine -Command $conf) -ne 0) { Write-Bad "could not write /etc/wsl.conf"; return $false }
+    # One-liner with printf instead of a here-doc: this .ps1 is checked out with
+    # CRLF on Windows, and a here-doc's terminator line would carry a \r (so bash
+    # never sees 'CONF') while every written line would keep its \r (so wsl fails
+    # with "Expected '=' in /etc/wsl.conf"). printf %s\n takes each line as an
+    # argument, so no embedded newlines exist to be mangled.
+    $cmd = "printf '%s\n' '[boot]' 'systemd=true' '' '[interop]' 'enabled=true' 'appendWindowsPath=false' > /etc/wsl.conf && sed -i 's/\r$//' /etc/wsl.conf"
+    if ((Invoke-Engine -Command $cmd) -ne 0) { Write-Bad "could not write /etc/wsl.conf"; return $false }
     & wsl.exe --terminate $ENGINE_DISTRO | Out-Null
     Write-Ok "systemd enabled (distro terminated so it restarts with systemd)"
     return $true
@@ -105,7 +100,10 @@ function Install-EngineStack {
     $enginePath = ConvertTo-EnginePath $RepoRoot
     Write-Step "provisioning docker + sysbox inside '$ENGINE_DISTRO'"
     Write-Host "  (repo visible in the distro at $enginePath)" -ForegroundColor DarkGray
-    $rc = Invoke-Engine -Command "bash '$enginePath/scripts/huddle-engine-install.sh'"
+    # Pipe through sed: with git's autocrlf the .sh is checked out CRLF, and bash
+    # then dies on $'\r' ("set: pipefail: invalid option name", "syntax error near
+    # unexpected token elif"). Stripping CR here makes it work either way.
+    $rc = Invoke-Engine -Command "sed 's/\r$//' '$enginePath/scripts/huddle-engine-install.sh' | bash -s --"
     if ($rc -ne 0) { Write-Bad "engine provisioning failed (exit $rc)"; return $false }
     Write-Ok "engine provisioned"
     return $true
