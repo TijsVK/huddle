@@ -178,12 +178,18 @@ function Start-EngineKeepalive {
     Start-Process -FilePath 'wsl.exe' `
         -ArgumentList @('-d', $ENGINE_DISTRO, '-u', 'root', '--', 'bash', '-c', "exec -a $marker sleep infinity") `
         -WindowStyle Hidden | Out-Null
-    Start-Sleep -Seconds 2
-    if ((Invoke-Engine -Quiet -Command "pgrep -f $marker >/dev/null 2>&1") -eq 0) {
-        Write-Ok "keepalive started - '$ENGINE_DISTRO' will stay up while you work"
-        return $true
+    # Starting a distro client can take a few seconds; poll instead of one sleep.
+    foreach ($i in 1..10) {
+        Start-Sleep -Seconds 1
+        if ((Invoke-Engine -Quiet -Command "pgrep -f $marker >/dev/null 2>&1") -eq 0) {
+            Write-Ok "keepalive started - '$ENGINE_DISTRO' stays up while you work"
+            return $true
+        }
     }
-    Write-Bad "could not start the keepalive; the distro may stop when idle (huddle will restart with docker)"
+    # Not fatal: the gateway has --restart unless-stopped, so it returns with the
+    # daemon. Only the idle teardown/restart cycle is not suppressed.
+    Write-Host "  [i] no keepalive process; the distro may stop when idle." -ForegroundColor DarkGray
+    Write-Host "      Huddle restarts with dockerd, or keep a shell open: wsl -d $ENGINE_DISTRO" -ForegroundColor DarkGray
     return $false
 }
 

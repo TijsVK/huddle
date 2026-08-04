@@ -101,6 +101,20 @@ function Write-Banner {
 }
 
 function Write-Status {
+    # In sysbox-modus draait de gateway op de ENGINE HOST (WSL2-distro), niet op
+    # de lokale docker. Deze status-regel keek altijd naar de lokale daemon en
+    # meldde daarom "gestopt" terwijl Huddle prima draaide op de engine.
+    if ($SYSBOX_MODE -and (Get-Command Invoke-Engine -ErrorAction SilentlyContinue)) {
+        $rc = Invoke-Engine -Quiet -Command "docker ps --filter name=^${HUDDLE_CONTAINER}`$ --format '{{.Names}}' | grep -q ."
+        if ($rc -eq 0) {
+            Write-Host "  [ON]  Huddle draait op de engine  -->  http://localhost:${HUDDLE_PORT}" -ForegroundColor Green
+        } else {
+            Write-Host "  [OFF] Huddle is gestopt (engine '$(if ($env:HUDDLE_ENGINE_DISTRO) { $env:HUDDLE_ENGINE_DISTRO } else { 'huddle-engine' })')" -ForegroundColor Red
+        }
+        Write-Host ""
+        return
+    }
+
     $running = & $RUNTIME ps --filter "name=^${HUDDLE_CONTAINER}$" --format "{{.Names}}"
     if ($running) {
         Write-Host "  [ON]  Huddle draait  -->  http://localhost:${HUDDLE_PORT}" -ForegroundColor Green
