@@ -175,10 +175,24 @@ function Start-EngineKeepalive {
         Write-Ok "keepalive already running (distro stays up)"
         return $true
     }
+    # Start-Process joins -ArgumentList with spaces WITHOUT quoting, so an element
+    # containing spaces is split into separate arguments: passing
+    #   'bash','-c','exec -a marker sleep infinity'
+    # made bash run the command string "exec" and exit instantly - which is why
+    # the keepalive never appeared. Verified by dumping argv from a child process.
+    # So: install a launcher in the distro (Invoke-Engine handles quoting via
+    # base64) and start it with arguments that contain no spaces at all.
+    $installer = @(
+        'printf "%s\n" "#!/bin/bash" "exec -a ' + $marker + ' sleep infinity" > /usr/local/bin/huddle-keepalive',
+        'chmod +x /usr/local/bin/huddle-keepalive'
+    ) -join ' && '
+    if ((Invoke-Engine -Quiet -Command $installer) -ne 0) {
+        Write-Host "  [i] could not install the keepalive launcher" -ForegroundColor DarkGray
+        return $false
+    }
     Start-Process -FilePath 'wsl.exe' `
-        -ArgumentList @('-d', $ENGINE_DISTRO, '-u', 'root', '--', 'bash', '-c', "exec -a $marker sleep infinity") `
+        -ArgumentList @('-d', $ENGINE_DISTRO, '-u', 'root', '--', '/usr/local/bin/huddle-keepalive') `
         -WindowStyle Hidden | Out-Null
-    # Starting a distro client can take a few seconds; poll instead of one sleep.
     foreach ($i in 1..10) {
         Start-Sleep -Seconds 1
         if ((Invoke-Engine -Quiet -Command "pgrep -f $marker >/dev/null 2>&1") -eq 0) {
