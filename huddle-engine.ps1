@@ -15,7 +15,8 @@
 param(
     [switch]$Setup,
     [switch]$Check,
-    [switch]$Shell
+    [switch]$Shell,
+    [switch]$Diagnose
 )
 
 # NB: do NOT set $ErrorActionPreference here. huddle.ps1 dot-sources this file,
@@ -181,6 +182,19 @@ function Start-HuddleOnEngine {
         Write-Ok "CLI built"
     }
 
+    # Preflight: WSL2 distros SHARE one network namespace, so a huddle container
+    # on Docker Desktop's daemon (e.g. left over from a classic init) already owns
+    # :$Port in that namespace. The engine's container then cannot bind it and
+    # exits immediately with an empty log - the classic "starts and stops" symptom.
+    if ((Invoke-Engine -Quiet -Command "ss -tln 2>/dev/null | grep -q ':$Port '") -eq 0) {
+        Write-Bad "port $Port is already in use inside the WSL network namespace."
+        Write-Host "  WSL2 distros share one netns, so this is usually a huddle container on" -ForegroundColor Yellow
+        Write-Host "  Docker Desktop's daemon. Stop it (or quit Docker Desktop) and retry:" -ForegroundColor Yellow
+        Write-Host "    docker rm -f huddle        # in a Windows terminal (Docker Desktop)" -ForegroundColor Yellow
+        Write-Host "  Or run Huddle on another port: `$env:HUDDLE_PORT = '3100'" -ForegroundColor Yellow
+        return $false
+    }
+
     Write-Step "huddle init (HUDDLE_SYSBOX=1) on the engine"
     $initCmd = "cd '$repo' && HUDDLE_SYSBOX=1 HUDDLE_IMAGE=$Image HUDDLE_NO_PULL=1 HUDDLE_PORT=$Port node cli/dist/index.js init"
     if ((Invoke-Engine -Command $initCmd) -ne 0) { Write-Bad "'huddle init' failed on the engine"; return $false }
@@ -210,9 +224,31 @@ function Start-HuddleOnEngine {
     return $true
 }
 
+
+# Everything needed to explain a gateway that will not stay up, in one paste.
+function Get-EngineDiagnostics {
+    if (-not (Test-HuddleEngine)) { Write-Bad "distro '$ENGINE_DISTRO' does not exist"; return $false }
+    $script = @(
+        'echo "== distro ==" ; uname -r ; uptime ; echo "pid1=$(ps -p 1 -o comm=)"',
+        'echo "== wsl.conf ==" ; cat -A /etc/wsl.conf 2>/dev/null | head -20',
+        'echo "== docker ==" ; docker version --format "client={{.Client.Version}} server={{.Server.Version}}" 2>&1 ; systemctl is-active docker',
+        'echo "== runtimes ==" ; docker info 2>/dev/null | grep -iA2 runtime | head -10',
+        'echo "== containers ==" ; docker ps -a --format "{{.Names}} | {{.Status}} | {{.Image}}"',
+        'echo "== huddle inspect ==" ; docker inspect huddle --format "state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} err={{.State.Error}} restarts={{.RestartCount}} policy={{.HostConfig.RestartPolicy.Name}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}" 2>&1',
+        'echo "== huddle logs (tail 50) ==" ; docker logs --tail 50 huddle 2>&1',
+        'echo "== dockerd journal (tail 30) ==" ; journalctl -u docker --no-pager -n 30 2>&1 | tail -30',
+        'echo "== kernel (oom?) ==" ; dmesg 2>/dev/null | tail -15',
+        'echo "== port 3000 ==" ; ss -tlnp 2>/dev/null | grep -E ":3000|:80 " ; echo "(empty = nothing listening)"',
+        'echo "== memory ==" ; free -m | head -2'
+    ) -join ' ; '
+    Invoke-Engine -Command $script | Out-Null
+    return $true
+}
+
 # Standalone entry points. Strict mode only applies when this script is RUN,
 # not when huddle.ps1 dot-sources it.
-if ($Setup -or $Check -or $Shell) { $ErrorActionPreference = 'Stop' }
+if ($Setup -or $Check -or $Shell -or $Diagnose) { $ErrorActionPreference = 'Stop' }
 if ($Setup) { if (Initialize-HuddleEngine -RepoRoot $PSScriptRoot) { exit 0 } else { exit 1 } }
 if ($Check) { if (Test-EngineReady) { exit 0 } else { exit 1 } }
 if ($Shell) { & wsl.exe -d $ENGINE_DISTRO; exit $LASTEXITCODE }
+if ($Diagnose) { if (Get-EngineDiagnostics) { exit 0 } else { exit 1 } }
