@@ -394,8 +394,12 @@ Reuse the harnesses that already exist on `experiment/dind` / `experiment/dind-r
 `gateway/test/dind-compat/` — `battery.sh` + `tools/*.sh` (Aspire, compose, Testcontainers,
 buildx, act, kind, playwright), `e2e-aspire-project-ef.sh` (boots the Aspire dashboard and
 asserts Blazor markup + zero gRPC/circuit errors, not log-greps), `e2e-escape.sh` (the host
-escape red test), `e2e-nested-egress.sh`, `e2e-nested-published-port.sh`, `e2e-toolchain-ca.sh`.
-Per prior lesson: do **not** accept log-greps as proof that a UI works.
+escape red test), `e2e-nested-egress.sh`, `e2e-nested-published-port.sh`, `e2e-toolchain-ca.sh`. The
+real-headless-browser harnesses live on `fork/worktree-dashboard-e2e-parity`:
+`e2e-aspire-dashboard.sh` (Chromium logs into the Aspire dashboard and asserts resources
+render Running) and `e2e-webui-docker-hello.sh` (drives the Huddle portal's own firewall
+approval flow, with video + screenshots). Per prior lesson: do **not** accept log-greps as
+proof that a UI works.
 
 - **S1 — `sbx` viability (Windows, ~2 days).** Create a sandbox on a Win11 box; mount a real
   .NET repo; run the Aspire E2E; attach JetBrains Gateway and VS Code over SSH; add a domain
