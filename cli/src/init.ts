@@ -176,6 +176,11 @@ export async function runInit(opts: InitOptions, images: ResolvedImages): Promis
   run(
     `${rt} run -d` +
     ` --name ${CONTAINER}` +
+    // Survive an engine/daemon restart. On Windows the engine host is a WSL2
+    // distro that gets terminated on `wsl --shutdown`, on idle, or by the
+    // systemd-enable step; dockerd then comes back but a policy-less container
+    // stays stopped.
+    ` --restart unless-stopped` +
     ` --network ${runtime.defaultNetwork}` +
     securityOptFlags +
     ` -e HUDDLE_RUNTIME=${runtime.name}` +

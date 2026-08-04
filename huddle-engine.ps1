@@ -185,7 +185,25 @@ function Start-HuddleOnEngine {
     $initCmd = "cd '$repo' && HUDDLE_SYSBOX=1 HUDDLE_IMAGE=$Image HUDDLE_NO_PULL=1 HUDDLE_PORT=$Port node cli/dist/index.js init"
     if ((Invoke-Engine -Command $initCmd) -ne 0) { Write-Bad "'huddle init' failed on the engine"; return $false }
 
+    # The gateway logs live on the engine, not in this terminal. Wait for it to
+    # actually answer, then show the tail - otherwise a container that dies in
+    # its first seconds looks like "it started and then nothing happened".
+    Write-Step "waiting for the gateway to come up"
+    $up = $false
+    foreach ($i in 1..30) {
+        if ((Invoke-Engine -Quiet -Command "docker inspect -f '{{.State.Running}}' huddle 2>/dev/null | grep -q true") -eq 0) { $up = $true; break }
+        Start-Sleep -Seconds 2
+    }
+    if (-not $up) {
+        Write-Bad "the huddle container is not running. Last output:"
+        Invoke-Engine -Command 'docker ps -a --filter name=huddle --format "{{.Names}} {{.Status}}"; echo "--- logs ---"; docker logs --tail 40 huddle 2>&1' | Out-Null
+        return $false
+    }
+    Write-Step "gateway log (last lines)"
+    Invoke-Engine -Command 'docker logs --tail 15 huddle 2>&1' | Out-Null
     Write-Ok "Huddle running in Sysbox mode - portal: http://localhost:$Port"
+    Write-Host "  Follow the log:  wsl -d $ENGINE_DISTRO -- docker logs -f huddle" -ForegroundColor DarkGray
+    Write-Host "  Container state: wsl -d $ENGINE_DISTRO -- docker ps -a" -ForegroundColor DarkGray
     Write-Host "  Devcontainers live on the engine's docker daemon. To attach an IDE:" -ForegroundColor DarkGray
     Write-Host "    VS Code : Remote-WSL into '$ENGINE_DISTRO', then 'Dev Containers: Attach to Running Container'" -ForegroundColor DarkGray
     Write-Host "    JetBrains: Gateway -> Docker server -> WSL/SSH pointing at '$ENGINE_DISTRO'" -ForegroundColor DarkGray
