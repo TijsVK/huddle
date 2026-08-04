@@ -51,9 +51,16 @@ function Test-HuddleEngine {
 
 # Run a command inside the engine distro as root.
 function Invoke-Engine {
-    param([Parameter(Mandatory)][string]$Command, [switch]$AsUser)
+    param([Parameter(Mandatory)][string]$Command, [switch]$AsUser, [switch]$Quiet)
     $userArgs = if ($AsUser) { @() } else { @('-u', 'root') }
-    & wsl.exe -d $ENGINE_DISTRO @userArgs -- bash -lc $Command
+    # Out-Host (or $null) keeps the command's OUTPUT out of the pipeline: this
+    # function must return only the exit code. Without it the caller gets an
+    # array of every printed line plus the code, and `-ne 0` is then always true.
+    if ($Quiet) {
+        & wsl.exe -d $ENGINE_DISTRO @userArgs -- bash -lc $Command *> $null
+    } else {
+        & wsl.exe -d $ENGINE_DISTRO @userArgs -- bash -lc $Command 2>&1 | Out-Host
+    }
     return $LASTEXITCODE
 }
 
@@ -82,6 +89,14 @@ function New-HuddleEngineDistro {
 }
 
 function Set-EngineWslConf {
+    # Only rewrite + restart when the config is actually wrong: terminating the
+    # distro kills the running gateway and every devcontainer, and menu option 6
+    # is also used as a plain "check my engine" action.
+    $needed = 'systemd=true'
+    if ((Invoke-Engine -Quiet -Command 'grep -q "^systemd=true" /etc/wsl.conf 2>/dev/null') -eq 0) {
+        Write-Ok "systemd already enabled in '$ENGINE_DISTRO' (left running)"
+        return $true
+    }
     Write-Step "enabling systemd in '$ENGINE_DISTRO' (Sysbox ships systemd units)"
     # One-liner with printf instead of a here-doc: this .ps1 is checked out with
     # CRLF on Windows, and a here-doc's terminator line would carry a \r (so bash
@@ -113,7 +128,7 @@ function Test-EngineReady {
     if (-not (Test-HuddleEngine)) { Write-Bad "distro '$ENGINE_DISTRO' does not exist - run with -Setup"; return $false }
     # No embedded double quotes: PowerShell has no backslash escaping, and
     # `docker info` already lists the runtimes in its plain output.
-    $rc = Invoke-Engine -Command 'command -v sysbox-runc >/dev/null 2>&1 && docker info 2>/dev/null | grep -q sysbox-runc'
+    $rc = Invoke-Engine -Quiet -Command 'command -v sysbox-runc >/dev/null 2>&1 && docker info 2>/dev/null | grep -q sysbox-runc'
     if ($rc -ne 0) { Write-Bad "engine exists but sysbox-runc is not registered - run with -Setup"; return $false }
     Write-Ok "engine '$ENGINE_DISTRO' ready (docker + sysbox-runc)"
     return $true

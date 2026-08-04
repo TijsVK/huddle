@@ -24,7 +24,7 @@ fatal(){ printf '\033[31m[FATAL]\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" = 0 ] || fatal "run as root (sudo)."
 
-# ── 1. prerequisites ─────────────────────────────────────────────────────────
+# -- 1. prerequisites ---------------------------------------------------------
 info "checking prerequisites"
 rc=0
 KVER=$(uname -r); KMAJ=${KVER%%.*}; KMIN=$(echo "$KVER" | cut -d. -f2)
@@ -36,18 +36,18 @@ else
   no "kernel $KVER is too old for Sysbox (needs >= 5.12, ideally >= 5.19)"; rc=1
 fi
 [ -e /dev/fuse ] && ok "/dev/fuse present (sysbox-fs is FUSE-based)" || { no "/dev/fuse missing"; rc=1; }
-[ "$(stat -fc %T /sys/fs/cgroup 2>/dev/null)" = cgroup2fs ] && ok "cgroup v2" || no "cgroup v1 — Sysbox prefers v2"
+[ "$(stat -fc %T /sys/fs/cgroup 2>/dev/null)" = cgroup2fs ] && ok "cgroup v2" || no "cgroup v1 - Sysbox prefers v2"
 [ "$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)" -gt 0 ] \
   && ok "user namespaces enabled" || { no "user namespaces disabled"; rc=1; }
 if [ "$(ps -p 1 -o comm= 2>/dev/null)" = systemd ]; then
   ok "systemd is PID 1 (Sysbox ships systemd units)"
 else
-  no "systemd is not PID 1 — on WSL2 set '[boot]\\nsystemd=true' in /etc/wsl.conf and 'wsl --shutdown'"; rc=1
+  no "systemd is not PID 1 - on WSL2 set '[boot]\\nsystemd=true' in /etc/wsl.conf and 'wsl --shutdown'"; rc=1
 fi
-grep -qi microsoft /proc/version && info "WSL2 detected — Sysbox's installer handles this case explicitly"
+grep -qi microsoft /proc/version && info "WSL2 detected - Sysbox's installer handles this case explicitly"
 [ $rc -eq 0 ] || fatal "prerequisites not met (see above)."
 
-# ── 2. docker engine ─────────────────────────────────────────────────────────
+# -- 2. docker engine ---------------------------------------------------------
 info "checking docker engine"
 if command -v dockerd >/dev/null 2>&1; then
   ok "docker engine present ($(docker --version 2>/dev/null | head -1))"
@@ -69,7 +69,7 @@ else
   ok "docker engine installed"
 fi
 
-# ── 2b. node (the Huddle CLI + gateway orchestration run ON the engine host) ──
+# -- 2b. node (the Huddle CLI + gateway orchestration run ON the engine host) --
 info "checking node"
 if command -v node >/dev/null 2>&1; then
   ok "node present ($(node --version))"
@@ -82,7 +82,7 @@ else
   }
 fi
 
-# ── 3. sysbox ────────────────────────────────────────────────────────────────
+# -- 3. sysbox ----------------------------------------------------------------
 info "checking sysbox"
 if command -v sysbox-runc >/dev/null 2>&1 && systemctl is-active --quiet sysbox 2>/dev/null; then
   ok "sysbox active ($(sysbox-runc --version 2>/dev/null | awk '/version/{print $2}' | head -1))"
@@ -107,7 +107,7 @@ else
   ok "sysbox installed"
 fi
 
-# ── 4. docker runtime registration ───────────────────────────────────────────
+# -- 4. docker runtime registration -------------------------------------------
 info "checking runtime registration"
 if docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q 'sysbox-runc'; then
   ok "dockerd knows the sysbox-runc runtime"
@@ -118,17 +118,31 @@ else
        {\"runtimes\":{\"sysbox-runc\":{\"path\":\"/usr/bin/sysbox-runc\"}}}"
 fi
 
-# ── 5. smoke test ────────────────────────────────────────────────────────────
+# -- 5. smoke test ------------------------------------------------------------
 if [ $CHECK_ONLY -eq 0 ]; then
   info "smoke test: unprivileged container under sysbox-runc"
-  if docker run --rm --runtime=sysbox-runc alpine sh -c 'head -1 /proc/self/uid_map' 2>/dev/null | grep -qv '^\s*0\s*0\s'; then
-    ok "sysbox container runs and is user-namespaced"
-  else
-    no "sysbox smoke test did not produce a shifted uid_map — check 'systemctl status sysbox'"
+  # sysbox-mgr/sysbox-fs come up right after install; give them a moment.
+  for _i in $(seq 1 15); do systemctl is-active --quiet sysbox && break; sleep 2; done
+  if ! docker image inspect alpine >/dev/null 2>&1; then
+    info "  pulling alpine for the smoke test"
+    docker pull -q alpine >/dev/null 2>&1 || no "  could not pull alpine (network/proxy?)"
   fi
-fi
+  if docker image inspect alpine >/dev/null 2>&1; then
+    smoke=$(docker run --rm --runtime=sysbox-runc alpine sh -c 'head -1 /proc/self/uid_map' 2>&1)
+    host_uid=$(echo "$smoke" | awk '{print $2}')
+    if [ -n "$host_uid" ] && [ "$host_uid" != 0 ]; then
+      ok "sysbox container runs and is user-namespaced (uid_map:$smoke)"
+    else
+      no "sysbox smoke test failed. Output was:"
+      printf '      %s\n' "$smoke"
+      no "check: systemctl status sysbox sysbox-mgr sysbox-fs"
+    fi
+  else
+    no "smoke test skipped (no alpine image)"
+  fi
+  fi
 
-# ── 6. address-pool advisory ─────────────────────────────────────────────────
+# -- 6. address-pool advisory -------------------------------------------------
 # Sysbox's installer wants bip 172.20.0.1/16 + default-address-pool 172.25.0.0/16
 # and silently skips them when they overlap existing subnets. Huddle's dc-net-*
 # networks are allocated from Docker's default pool, so a clash shows up as
@@ -139,4 +153,4 @@ grep -qE '"(bip|default-address-pool)"' /etc/docker/daemon.json 2>/dev/null \
   && ok "daemon.json pins bip/default-address-pool" \
   || info "  advisory: pin \"default-address-pool\" in /etc/docker/daemon.json if you see dc-net conflicts"
 
-info "engine host ready — start Huddle with HUDDLE_SYSBOX=1"
+info "engine host ready - start Huddle with HUDDLE_SYSBOX=1"
