@@ -367,7 +367,9 @@ function Set-VsCodeDockerShim {
     # way it does. 'docker returned an error / make sure the docker daemon is
     # running' usually means stray text (a wsl.exe warning) landed in stdout where
     # the extension expects pure JSON.
-    $probe = & cmd.exe /c "`"$shim`" version --format {{json .}}" 2>&1
+    # The template must stay ONE argument: unquoted, cmd splits it at the space and
+    # docker reports "'docker version' accepts no arguments".
+    $probe = & cmd.exe /c "`"$shim`" version --format `"{{json .}}`"" 2>&1
     $probeText = ($probe | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) {
         Write-Bad "the shim could not reach the engine (exit $LASTEXITCODE):"
@@ -388,14 +390,14 @@ function Set-VsCodeDockerShim {
         Write-Host "    $probeText" -ForegroundColor DarkGray
         return $false
     }
-    $names = & cmd.exe /c "`"$shim`" ps --format {{.Names}}" 2>&1
+    $names = & cmd.exe /c "`"$shim`" ps --format `"{{.Names}}`"" 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Bad "'docker ps' through the shim failed:"
         Write-Host "    $(($names | Out-String).Trim())" -ForegroundColor DarkGray
         return $false
     }
     Write-Ok "shim reaches the engine (containers: $((($names | Where-Object { $_ }) -join ', ')))"
-    $ms = (Measure-Command { & cmd.exe /c "`"$shim`" version --format {{.Server.Version}}" | Out-Null }).TotalMilliseconds
+    $ms = (Measure-Command { & cmd.exe /c "`"$shim`" version --format `"{{.Server.Version}}`"" | Out-Null }).TotalMilliseconds
     Write-Host ("  one docker call through the shim: {0:N0} ms" -f $ms) -ForegroundColor DarkGray
     if ($ms -gt 2500) {
         Write-Host "  That is slow for a single call; the Dev Containers extension makes many." -ForegroundColor Yellow
