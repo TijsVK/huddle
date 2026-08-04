@@ -149,3 +149,84 @@ Two rules that bit here:
   single-quoted string, or avoid embedded quotes entirely.
 - **Keep `huddle-engine.ps1` pure ASCII.** The repo's `.ps1` files have no BOM, and Windows
   PowerShell 5.1 reads BOM-less files as ANSI, so em dashes and arrows render as mojibake.
+
+
+---
+
+# Field notes from the first real Windows run (2026-08-04)
+
+Everything below was found on an actual Windows 11 + WSL2 box, not inferred. The engine,
+gateway, firewall path, ports and status reporting now work there; the remaining blocker at the
+time of writing is `fusermount3`.
+
+## Prerequisites that are NOT optional
+
+1. **`fuse3` on the engine.** sysbox-fs virtualizes `/proc` and `/sys` over FUSE and shells out
+   to `fusermount3`. The sysbox package only depends on `fuse` (FUSE 2), so a stock Ubuntu engine
+   has `/usr/bin/fusermount` and no `fusermount3`, and then **every** container fails with:
+   ```
+   failed to pre-register with sysbox-fs ... Initialization error for container-id ...
+   # sysbox-fs journal: fusermount: exec: "fusermount3": executable file not found in $PATH
+   ```
+   `scripts/huddle-engine-install.sh` now installs it unconditionally and restarts sysbox.
+   Reproduced both directions on a working engine (hide `fusermount3` -> identical error; restore
+   -> containers start with a shifted uid_map).
+
+2. **A keepalive, or WSL will recycle the distro.** WSL tears a distro down once no client is
+   attached. Since `huddle.ps1` drives the engine with short-lived `wsl.exe` calls, the distro —
+   systemd, dockerd and the gateway with it — goes down seconds after each command, and the next
+   call boots it again. The symptom is a gateway that is always `Up 1 second`, a dockerd journal
+   full of `Starting docker.service`, and occasionally catching the boot itself
+   (`Failed to start the systemd user session`, missing `/var/run/docker.sock`).
+   `.\huddle-engine.ps1 -Keepalive` holds one hidden `wsl.exe` client open. If that ever fails,
+   either keep a `wsl -d huddle-engine` window open, or stop WSL idling the VM:
+   ```ini
+   # %USERPROFILE%\.wslconfig
+   [wsl2]
+   vmIdleTimeout=315360000000
+   ```
+   This is an inherited property of the "Huddle owns a WSL2 distro" design, not a Huddle bug — a
+   Hyper-V VM engine would not behave this way, at the cost of managing a real VM.
+
+3. **`--restart unless-stopped` on the gateway** (now set by `cli/src/init.ts`) so it returns
+   whenever dockerd does.
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `.\huddle-engine.ps1 -Setup` | create/provision the engine distro (idempotent) |
+| `.\huddle-engine.ps1 -Check` | verify docker + sysbox-runc |
+| `.\huddle-engine.ps1 -Up` | bring the stack back after a distro/Windows restart, without re-init |
+| `.\huddle-engine.ps1 -Keepalive` | (re)start the client that stops WSL recycling the distro |
+| `.\huddle-engine.ps1 -Diagnose` | one paste: distro, wsl.conf, docker, sysbox units + journals, keepalive, containers, gateway inspect + logs, fuse/apparmor, ports, memory |
+| `.\huddle-engine.ps1 -Code` | open VS Code inside the distro (see below) |
+| `.\huddle-engine.ps1 -Attach` | list devcontainers + IDE attach instructions |
+| `.\huddle.ps1` -> `r` or Enter | refresh status; in sysbox mode also lists the engine's containers |
+
+## IDE attach
+
+VS Code's Dev Containers extension queries the **local** docker (Docker Desktop), so it lists
+nothing: the devcontainers live on the engine daemon. VS Code has to run inside the distro —
+`-Code` does `code --remote wsl+huddle-engine`, after which *Dev Containers: Attach to Running
+Container* shows them. This also means `/etc/wsl.conf` must keep `appendWindowsPath=true`;
+an earlier version set it to `false`, which removes `code` from the PATH inside the distro.
+
+## Gotchas that cost time here
+
+- The gateway logs `[api] listening on 127.0.0.1:3000` — that is the port **inside** the
+  container. The published port is whatever `$env:HUDDLE_PORT` says.
+- `$env:HUDDLE_PORT` was ignored (hard-coded 3000) and then *deleted* by the classic init path.
+  Both fixed; the caller's value is now read and restored.
+- The menu's status line queried the local docker in sysbox mode, so it printed
+  `[OFF] Huddle is gestopt` while the gateway was serving happily on the engine.
+- A re-init could not replace a running gateway: the port preflight ran before `huddle init` and
+  refused because the *previous* gateway held the port.
+- PowerShell specifics that bit repeatedly: no backslash escaping in strings; `Start-Process`
+  joins `-ArgumentList` **without quoting**, so any element containing spaces is split;
+  `$ErrorActionPreference = 'Stop'` in a dot-sourced file leaks into the caller and turns native
+  stderr into terminating errors; `2>&1` on a native command turns ordinary progress output into
+  ErrorRecords. Payloads to `wsl.exe` are now base64-encoded to sidestep quoting entirely.
+- Parse-check before shipping: `pwsh` runs on Linux, so
+  `[System.Management.Automation.Language.Parser]::ParseFile()` catches syntax errors without a
+  Windows box.
