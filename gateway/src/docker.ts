@@ -1167,7 +1167,16 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
       Mounts: mounts,
       NetworkMode: netName,
       CapAdd: ['NET_ADMIN'],
-      ...(SYSBOX_ENABLED ? { Runtime: SYSBOX_RUNTIME } : {}),
+      ...(SYSBOX_ENABLED
+        ? {
+            Runtime: SYSBOX_RUNTIME,
+            // De engine host is op Windows een WSL2-distro die afgebroken wordt
+            // zodra er geen client meer hangt (of bij wsl --shutdown). Zonder
+            // restart-policy staat de devcontainer daarna stil terwijl dockerd
+            // wél terugkomt — de developer verliest zijn omgeving bij elke cycle.
+            RestartPolicy: { Name: 'unless-stopped' },
+          }
+        : {}),
       ...(RUNTIME_SECURITY_OPT.length ? { SecurityOpt: RUNTIME_SECURITY_OPT } : {}),
       Memory: parseMemoryBytes(params.memory || getSetting('defaultMemory') || '8g'),
       CpuQuota: parseCpuQuota(params.cpus || getSetting('defaultCpus') || '2'),
