@@ -1,6 +1,9 @@
 # Research: a stronger backing layer for Huddle
 
-**Status:** research only — no code, no decision taken.
+**Status:** research + one executed spike — no code, no decision taken.
+**S2′ has been run:** Sysbox 0.7.1 on this WSL2 host passes — unprivileged Docker-in-Docker,
+every DinD-red-test escape vector blocked, and compose/buildx/dind²/kind all working. Results:
+[`2026-08-S2-sysbox-spike-results.md`](2026-08-S2-sysbox-spike-results.md).
 **Date:** 2026-08-04. **Base:** `main` @ `8ec8c6c`.
 **Question:** keep Huddle's firewall + devcontainer workflow, drop the "precise Docker
 controls" baggage, and make the host↔devcontainer wall much stronger than a hand-rolled
@@ -484,7 +487,12 @@ proof that a UI works.
 **Revised order under the §0 constraints: S2′ first, then S3′, then S4/S5. S1 and S2 become
 benchmarks, not decisions.**
 
-- **S2′ — Sysbox conformance (~2-3 days, do first).** In a **throwaway** WSL2 distro (never the
+- **S2′ — Sysbox conformance — ✅ DONE 2026-08-04, passed.** Results and the measured escape
+  matrix: [`2026-08-S2-sysbox-spike-results.md`](2026-08-S2-sysbox-spike-results.md). Deviation
+  from the plan below: run on *this* host rather than a throwaway distro, because no Windows
+  filesystem is mounted here so `wsl.exe` was unreachable; the installer refuses to proceed with
+  containers present, so the three Aspire `sqlserver-*` containers were removed (authorised,
+  volumes untouched) and `dockerd` restarted. Original plan, for the record: In a **throwaway** WSL2 distro (never the
   working one — installing Sysbox restarts `dockerd`): install Sysbox 0.7.1, run a devcontainer
   with `--runtime=sysbox-runc`, start `dockerd` **inside** it unprivileged, then run the full
   dind-compat battery with `socket-proxy` and `dind-authz` **disabled**, plus `e2e-escape.sh`.
