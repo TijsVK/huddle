@@ -111,23 +111,38 @@ else
   fi
 fi
 
-# -- 2d. docker group for the distro's default user ----------------------------
-# VS Code (Remote-WSL) runs as the distro's default user, not root. If that user
-# cannot read /var/run/docker.sock, the Dev Containers extension silently lists
-# no containers to attach to.
-DEFAULT_USER=$(getent passwd 1000 2>/dev/null | cut -d: -f1)
-if [ -n "$DEFAULT_USER" ]; then
-  if id -nG "$DEFAULT_USER" 2>/dev/null | grep -qw docker; then
-    ok "user '$DEFAULT_USER' is in the docker group"
-  elif [ $CHECK_ONLY -eq 1 ]; then
-    no "user '$DEFAULT_USER' is NOT in the docker group (VS Code attach will show nothing)"
-  else
-    groupadd -f docker
-    usermod -aG docker "$DEFAULT_USER"
-    ok "added '$DEFAULT_USER' to the docker group (re-open the WSL session to pick it up)"
-  fi
+# -- 2d. a real (non-root) user ------------------------------------------------
+# A distro whose only user is root makes every WSL session a root session, and
+# WSL then prints "Failed to start the systemd user session for 'root'" - noise
+# that lands in stdout and breaks tools which parse command output as JSON (the
+# VS Code Dev Containers extension does exactly that). It is also what VS Code
+# connects as over Remote-WSL. So give the engine a normal user in the docker
+# group and make it the default.
+HUDDLE_ENGINE_USER="${HUDDLE_ENGINE_USER:-huddle}"
+info "checking engine user '$HUDDLE_ENGINE_USER'"
+if id "$HUDDLE_ENGINE_USER" >/dev/null 2>&1; then
+  ok "user '$HUDDLE_ENGINE_USER' exists"
+elif [ $CHECK_ONLY -eq 1 ]; then
+  no "user '$HUDDLE_ENGINE_USER' missing (sessions run as root; WSL will warn about the systemd user session)"
 else
-  info "no uid-1000 user in this distro; VS Code will connect as root (docker access is fine)"
+  useradd -m -s /bin/bash "$HUDDLE_ENGINE_USER" 2>/dev/null || true
+  ok "created user '$HUDDLE_ENGINE_USER'"
+fi
+if id "$HUDDLE_ENGINE_USER" >/dev/null 2>&1 && [ $CHECK_ONLY -eq 0 ]; then
+  groupadd -f docker
+  usermod -aG docker,sudo "$HUDDLE_ENGINE_USER" 2>/dev/null || usermod -aG docker "$HUDDLE_ENGINE_USER" 2>/dev/null || true
+  printf '%s\n' "$HUDDLE_ENGINE_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-huddle-engine
+  chmod 0440 /etc/sudoers.d/90-huddle-engine
+  ok "'$HUDDLE_ENGINE_USER' is in the docker group with passwordless sudo"
+  # make it the DEFAULT wsl user, preserving the rest of wsl.conf
+  if ! grep -q "^default=$HUDDLE_ENGINE_USER" /etc/wsl.conf 2>/dev/null; then
+    if grep -q '^\[user\]' /etc/wsl.conf 2>/dev/null; then
+      sed -i "/^\[user\]/,/^\[/ s/^default=.*/default=$HUDDLE_ENGINE_USER/" /etc/wsl.conf
+    else
+      printf '%s\n' '' '[user]' "default=$HUDDLE_ENGINE_USER" >> /etc/wsl.conf
+    fi
+    ok "default WSL user set to '$HUDDLE_ENGINE_USER' (takes effect after: wsl --terminate $(hostname 2>/dev/null || echo huddle-engine))"
+  fi
 fi
 
 # -- 3. sysbox ----------------------------------------------------------------

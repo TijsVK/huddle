@@ -118,7 +118,13 @@ function Set-EngineWslConf {
     Write-Step "writing /etc/wsl.conf in '$ENGINE_DISTRO' (systemd + Windows PATH interop)"
     # printf per line instead of a here-doc: this .ps1 is checked out CRLF on
     # Windows and a here-doc terminator would carry a \r.
-    $cmd = "printf '%s\n' '[boot]' 'systemd=true' '' '[interop]' 'enabled=true' 'appendWindowsPath=true' > /etc/wsl.conf && sed -i 's/\r$//' /etc/wsl.conf"
+    # Preserve the [user] default line if the installer already set one - rewriting
+    # wsl.conf wholesale would silently put every session back to root.
+    # Single-quoted PowerShell string: the payload is bash and must not be touched.
+    $cmd = 'u=$(sed -n "s/^default=//p" /etc/wsl.conf 2>/dev/null | head -1); ' +
+           "printf '%s\n' '[boot]' 'systemd=true' '' '[interop]' 'enabled=true' 'appendWindowsPath=true' > /etc/wsl.conf; " +
+           'if [ -n "$u" ]; then printf "%s\n" "" "[user]" "default=$u" >> /etc/wsl.conf; fi; ' +
+           "sed -i 's/\r$//' /etc/wsl.conf; true"
     if ((Invoke-Engine -Command $cmd) -ne 0) { Write-Bad "could not write /etc/wsl.conf"; return $false }
     & wsl.exe --terminate $ENGINE_DISTRO | Out-Null
     Write-Ok "wsl.conf written (distro restarted so it takes effect)"
