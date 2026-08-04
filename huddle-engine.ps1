@@ -1,5 +1,5 @@
-# ──────────────────────────────────────────────────────────────────────────────
-#  Huddle engine host (Windows) — provision the WSL2 distro that runs dockerd
+# ------------------------------------------------------------------------------
+#  Huddle engine host (Windows) - provision the WSL2 distro that runs dockerd
 #  with the Sysbox runtime, so every devcontainer can be a Sysbox sandbox with
 #  its own Docker inside.
 #
@@ -11,7 +11,7 @@
 #     .\huddle-engine.ps1 -Setup     # create + provision the distro
 #     .\huddle-engine.ps1 -Check     # verify an existing engine
 #     .\huddle-engine.ps1 -Shell     # open a shell in the engine
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 param(
     [switch]$Setup,
     [switch]$Check,
@@ -108,9 +108,11 @@ function Install-EngineStack {
 }
 
 function Test-EngineReady {
-    if (-not (Test-HuddleEngine)) { Write-Bad "distro '$ENGINE_DISTRO' does not exist — run with -Setup"; return $false }
-    $rc = Invoke-Engine -Command "bash -c 'command -v sysbox-runc >/dev/null && docker info --format \"{{json .Runtimes}}\" | grep -q sysbox-runc'"
-    if ($rc -ne 0) { Write-Bad "engine exists but sysbox-runc is not registered — run with -Setup"; return $false }
+    if (-not (Test-HuddleEngine)) { Write-Bad "distro '$ENGINE_DISTRO' does not exist - run with -Setup"; return $false }
+    # No embedded double quotes: PowerShell has no backslash escaping, and
+    # `docker info` already lists the runtimes in its plain output.
+    $rc = Invoke-Engine -Command 'command -v sysbox-runc >/dev/null 2>&1 && docker info 2>/dev/null | grep -q sysbox-runc'
+    if ($rc -ne 0) { Write-Bad "engine exists but sysbox-runc is not registered - run with -Setup"; return $false }
     Write-Ok "engine '$ENGINE_DISTRO' ready (docker + sysbox-runc)"
     return $true
 }
@@ -161,7 +163,7 @@ function Start-HuddleOnEngine {
     $initCmd = "cd '$repo' && HUDDLE_SYSBOX=1 HUDDLE_IMAGE=$Image HUDDLE_NO_PULL=1 HUDDLE_PORT=$Port node cli/dist/index.js init"
     if ((Invoke-Engine -Command $initCmd) -ne 0) { Write-Bad "'huddle init' failed on the engine"; return $false }
 
-    Write-Ok "Huddle running in Sysbox mode — portal: http://localhost:$Port"
+    Write-Ok "Huddle running in Sysbox mode - portal: http://localhost:$Port"
     Write-Host "  Devcontainers live on the engine's docker daemon. To attach an IDE:" -ForegroundColor DarkGray
     Write-Host "    VS Code : Remote-WSL into '$ENGINE_DISTRO', then 'Dev Containers: Attach to Running Container'" -ForegroundColor DarkGray
     Write-Host "    JetBrains: Gateway -> Docker server -> WSL/SSH pointing at '$ENGINE_DISTRO'" -ForegroundColor DarkGray

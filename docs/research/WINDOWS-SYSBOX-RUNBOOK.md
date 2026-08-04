@@ -128,3 +128,24 @@ syntax-checked). Treat the first run as spike **S7** and expect small fixes.
 - **Engine verifier runs green on a WSL2 host**: `scripts/huddle-engine-install.sh --check` reports
   kernel 6.6, `/dev/fuse`, cgroup v2, user namespaces, systemd PID 1, docker 29.6.2, sysbox 0.7.1
   active, `sysbox-runc` registered.
+
+## Validating the PowerShell before shipping it
+
+PowerShell parses fine on Linux via `pwsh`, so there is no excuse for shipping a script that
+does not even parse:
+
+```bash
+pwsh -NoProfile -Command '
+  $e=$null;$t=$null
+  foreach ($f in @("huddle.ps1","huddle-engine.ps1")) {
+    $null=[System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f),[ref]$t,[ref]$e)
+    if ($e.Count -eq 0) { "PARSE OK  $f" } else { "PARSE FAIL $f"; $e | % { "  line $($_.Extent.StartLineNumber): $($_.Message)" } }
+  }'
+```
+
+Two rules that bit here:
+- **PowerShell has no backslash escaping.** `"... --format \"{{json .Runtimes}}\" ..."` terminates
+  the string at the first `\"`; the parse error then surfaces dozens of lines later. Use a
+  single-quoted string, or avoid embedded quotes entirely.
+- **Keep `huddle-engine.ps1` pure ASCII.** The repo's `.ps1` files have no BOM, and Windows
+  PowerShell 5.1 reads BOM-less files as ANSI, so em dashes and arrows render as mojibake.
