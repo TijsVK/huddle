@@ -355,6 +355,7 @@ function Get-EngineDiagnostics {
 # The Dev Containers extension shells out to a docker CLI; point it at a shim that
 # forwards to the engine's daemon over wsl.exe. No TCP socket, no sshd, no
 # Remote-WSL window needed.
+
 function Set-VsCodeDockerShim {
     param([switch]$Apply)
     $shim = Join-Path $PSScriptRoot 'scripts\huddle-docker.cmd'
@@ -370,6 +371,11 @@ function Set-VsCodeDockerShim {
         return $false
     }
     Write-Ok "shim reaches the engine (containers: $((($names | Where-Object { $_ }) -join ', ')))"
+    $ms = (Measure-Command { & cmd.exe /c "`"$shim`" version --format {{.Server.Version}}" | Out-Null }).TotalMilliseconds
+    Write-Host ("  one docker call through the shim: {0:N0} ms" -f $ms) -ForegroundColor DarkGray
+    if ($ms -gt 2500) {
+        Write-Host "  That is slow for a single call; the Dev Containers extension makes many." -ForegroundColor Yellow
+    }
 
     $settings = Join-Path $env:APPDATA 'Code\User\settings.json'
     # JSON needs each backslash doubled. Plain .NET Replace - a -replace regex here
