@@ -108,6 +108,13 @@ function Write-Status {
         $rc = Invoke-Engine -Quiet -Command "docker ps --filter name=^${HUDDLE_CONTAINER}`$ --format '{{.Names}}' | grep -q ."
         if ($rc -eq 0) {
             Write-Host "  [ON]  Huddle draait op de engine  -->  http://localhost:${HUDDLE_PORT}" -ForegroundColor Green
+            # Zonder keepalive breekt WSL de distro af zodra er geen client meer
+            # hangt: dockerd en de gateway gaan mee, en bij het volgende commando
+            # start alles opnieuw ("Up 1 second" bij elke refresh).
+            if ((Get-Command Test-EngineKeepalive -ErrorAction SilentlyContinue) -and -not (Test-EngineKeepalive)) {
+                Write-Host "  [!]   geen keepalive: WSL sloopt de distro tussen commando's door" -ForegroundColor Yellow
+                Write-Host "        herstel met: .\huddle-engine.ps1 -Keepalive" -ForegroundColor DarkGray
+            }
         } else {
             Write-Host "  [OFF] Huddle is gestopt (engine '$(if ($env:HUDDLE_ENGINE_DISTRO) { $env:HUDDLE_ENGINE_DISTRO } else { 'huddle-engine' })')" -ForegroundColor Red
         }

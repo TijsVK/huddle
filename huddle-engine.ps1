@@ -19,7 +19,8 @@ param(
     [switch]$Diagnose,
     [switch]$Code,
     [switch]$Attach,
-    [switch]$Up
+    [switch]$Up,
+    [switch]$Keepalive
 )
 
 # NB: do NOT set $ErrorActionPreference here. huddle.ps1 dot-sources this file,
@@ -172,6 +173,11 @@ function Initialize-HuddleEngine {
 #
 # A hidden, long-lived client keeps the distro alive. It is idempotent and costs
 # one sleeping process.
+
+function Test-EngineKeepalive {
+    return ((Invoke-Engine -Quiet -Command 'pgrep -f huddle-engine-keepalive >/dev/null 2>&1') -eq 0)
+}
+
 function Start-EngineKeepalive {
     $marker = 'huddle-engine-keepalive'
     if ((Invoke-Engine -Quiet -Command "pgrep -f $marker >/dev/null 2>&1") -eq 0) {
@@ -308,6 +314,8 @@ function Get-EngineDiagnostics {
         'echo "== huddle inspect ==" ; docker inspect huddle --format "state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} err={{.State.Error}} restarts={{.RestartCount}} policy={{.HostConfig.RestartPolicy.Name}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}" 2>&1',
         'echo "== huddle logs (tail 50) ==" ; docker logs --tail 50 huddle 2>&1',
         'echo "== dockerd journal (tail 30) ==" ; journalctl -u docker --no-pager -n 30 2>&1 | tail -30',
+        'echo "== keepalive ==" ; pgrep -af huddle-engine-keepalive || echo "NOT RUNNING - the distro will be torn down between commands" ; ls -l /usr/local/bin/huddle-keepalive 2>&1',
+        'echo "== distro uptime (resets on every distro restart) ==" ; cat /proc/uptime',
         'echo "== sysbox units ==" ; systemctl is-active sysbox sysbox-mgr sysbox-fs 2>&1 | tr "\n" " " ; echo',
         'echo "== sysbox-fs journal (tail 30) ==" ; journalctl -u sysbox-fs --no-pager -n 30 2>&1 | tail -30',
         'echo "== sysbox-mgr journal (tail 30) ==" ; journalctl -u sysbox-mgr --no-pager -n 30 2>&1 | tail -30',
@@ -388,7 +396,7 @@ function Show-AttachHelp {
 
 # Standalone entry points. Strict mode only applies when this script is RUN,
 # not when huddle.ps1 dot-sources it.
-if ($Setup -or $Check -or $Shell -or $Diagnose -or $Code -or $Attach -or $Up) { $ErrorActionPreference = 'Stop' }
+if ($Setup -or $Check -or $Shell -or $Diagnose -or $Code -or $Attach -or $Up -or $Keepalive) { $ErrorActionPreference = 'Stop' }
 if ($Setup) { if (Initialize-HuddleEngine -RepoRoot $PSScriptRoot) { exit 0 } else { exit 1 } }
 if ($Check) { if (Test-EngineReady) { exit 0 } else { exit 1 } }
 if ($Shell) { & wsl.exe -d $ENGINE_DISTRO; exit $LASTEXITCODE }
@@ -396,3 +404,17 @@ if ($Diagnose) { if (Get-EngineDiagnostics) { exit 0 } else { exit 1 } }
 if ($Code)     { if (Open-EngineInVsCode) { exit 0 } else { exit 1 } }
 if ($Attach)   { Show-AttachHelp; exit 0 }
 if ($Up)       { if (Start-EngineStack) { exit 0 } else { exit 1 } }
+if ($Keepalive) {
+    if (Start-EngineKeepalive) {
+        Invoke-Engine -Command 'pgrep -af huddle-engine-keepalive' | Out-Null
+        exit 0
+    }
+    Write-Bad "keepalive could not be started - without it WSL tears the distro down between commands"
+    Write-Host "  Workarounds:" -ForegroundColor Yellow
+    Write-Host "    1. keep one shell open:  wsl -d $ENGINE_DISTRO" -ForegroundColor Yellow
+    Write-Host "    2. stop WSL idling the VM: add to %USERPROFILE%\.wslconfig" -ForegroundColor Yellow
+    Write-Host "         [wsl2]" -ForegroundColor Yellow
+    Write-Host "         vmIdleTimeout=-1" -ForegroundColor Yellow
+    Write-Host "       then: wsl --shutdown  (and start Huddle again)" -ForegroundColor Yellow
+    exit 1
+}
