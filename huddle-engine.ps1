@@ -68,14 +68,18 @@ function Invoke-Engine {
     # be re-interpreted on the way in.
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Command))
     $wrapped = "echo $b64 | base64 -d | bash"
+    # --cd / on EVERY call: wsl translates the caller's Windows directory and
+    # enters it as the target user. After switching the default user away from
+    # root that fails with "chdir(2) failed.: Permission denied" for anything
+    # started from a Windows path, which breaks every engine command.
     if ($Quiet) {
-        & wsl.exe -d $ENGINE_DISTRO @userArgs -- bash -lc $wrapped *> $null
+        & wsl.exe -d $ENGINE_DISTRO @userArgs --cd / -- bash -lc $wrapped *> $null
     } else {
         # NO 2>&1: merging stderr into the pipeline turns every stderr line into
         # an ErrorRecord, so ordinary progress output (docker/buildkit writes its
         # progress to stderr) is rendered as a NativeCommandError. Out-Host keeps
         # stdout out of the return value.
-        & wsl.exe -d $ENGINE_DISTRO @userArgs -- bash -lc $wrapped | Out-Host
+        & wsl.exe -d $ENGINE_DISTRO @userArgs --cd / -- bash -lc $wrapped | Out-Host
     }
     return $LASTEXITCODE
 }
@@ -123,8 +127,10 @@ function Set-EngineWslConf {
     # wsl.conf wholesale would silently put every session back to root.
     # Single-quoted PowerShell string: the payload is bash and must not be touched.
     $cmd = 'u=$(sed -n "s/^default=//p" /etc/wsl.conf 2>/dev/null | head -1); ' +
-           "printf '%s\n' '[boot]' 'systemd=true' '' '[interop]' 'enabled=true' 'appendWindowsPath=true' > /etc/wsl.conf; " +
-           'if [ -n "$u" ]; then printf "%s\n" "" "[user]" "default=$u" >> /etc/wsl.conf; fi; ' +
+           'printf "%s\n" "[boot]" "systemd=true" "" "[interop]" "enabled=true" "appendWindowsPath=true" > /etc/wsl.conf; ' +
+           'if [ -n "$u" ]; then printf "%s\n" "" "[user]" "default=$u" >> /etc/wsl.conf; ' +
+           'printf "%s\n" "" "[automount]" "enabled=true" "options=metadata,uid=$(id -u $u),gid=$(id -g $u),umask=022" >> /etc/wsl.conf; fi; ' +
+           'sed -i "s/\r$//" /etc/wsl.conf; true'
            "sed -i 's/\r$//' /etc/wsl.conf; true"
     if ((Invoke-Engine -Command $cmd) -ne 0) { Write-Bad "could not write /etc/wsl.conf"; return $false }
     & wsl.exe --terminate $ENGINE_DISTRO | Out-Null
@@ -209,7 +215,7 @@ function Start-EngineKeepalive {
     $proc = $null
     try {
         $proc = Start-Process -FilePath 'wsl.exe' `
-            -ArgumentList @('-d', $ENGINE_DISTRO, '-u', 'root', '--', $launcher) `
+            -ArgumentList @('-d', $ENGINE_DISTRO, '-u', 'root', '--cd', '/', '--', $launcher) `
             -WindowStyle Hidden -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
     } catch {
         Write-Host "  [i] Start-Process failed: $($_.Exception.Message)" -ForegroundColor DarkGray
@@ -230,7 +236,7 @@ function Start-EngineKeepalive {
 
     # 3. attempt B - cmd's own detacher, in case Start-Process/PowerShell reaps it
     Write-Host "  [i] retrying via 'cmd /c start /b'" -ForegroundColor DarkGray
-    & cmd.exe /c "start `"huddle-keepalive`" /b wsl.exe -d $ENGINE_DISTRO -u root -- $launcher" | Out-Null
+    & cmd.exe /c "start `"huddle-keepalive`" /b wsl.exe -d $ENGINE_DISTRO -u root --cd / -- $launcher" | Out-Null
     foreach ($i in 1..8) {
         if (Test-EngineKeepalive) { Write-Ok "keepalive started (cmd start /b) - '$ENGINE_DISTRO' stays up"; return $true }
         Start-Sleep -Seconds 1
@@ -484,8 +490,10 @@ function Disable-EngineWindowsPath {
     if (-not (Test-HuddleEngine)) { Write-Bad "distro '$ENGINE_DISTRO' does not exist"; return $false }
     Write-Step "removing the Windows PATH from '$ENGINE_DISTRO'"
     $cmd = 'u=$(sed -n "s/^default=//p" /etc/wsl.conf 2>/dev/null | head -1); ' +
-           "printf '%s\n' '[boot]' 'systemd=true' '' '[interop]' 'enabled=true' 'appendWindowsPath=false' > /etc/wsl.conf; " +
-           'if [ -n "$u" ]; then printf "%s\n" "" "[user]" "default=$u" >> /etc/wsl.conf; fi; ' +
+           'printf "%s\n" "[boot]" "systemd=true" "" "[interop]" "enabled=true" "appendWindowsPath=false" > /etc/wsl.conf; ' +
+           'if [ -n "$u" ]; then printf "%s\n" "" "[user]" "default=$u" >> /etc/wsl.conf; ' +
+           'printf "%s\n" "" "[automount]" "enabled=true" "options=metadata,uid=$(id -u $u),gid=$(id -g $u),umask=022" >> /etc/wsl.conf; fi; ' +
+           'sed -i "s/\r$//" /etc/wsl.conf; true'
            "sed -i 's/\r$//' /etc/wsl.conf; true"
     if ((Invoke-Engine -Command $cmd) -ne 0) { Write-Bad "could not write /etc/wsl.conf"; return $false }
     & wsl.exe --terminate $ENGINE_DISTRO | Out-Null
@@ -577,7 +585,7 @@ function Show-AttachHelp {
 if ($Setup -or $Check -or $Shell -or $Diagnose -or $Code -or $Attach -or $Up -or $Keepalive -or $VsCode -or $IsolatePath) { $ErrorActionPreference = 'Stop' }
 if ($Setup) { if (Initialize-HuddleEngine -RepoRoot $PSScriptRoot) { exit 0 } else { exit 1 } }
 if ($Check) { if (Test-EngineReady) { exit 0 } else { exit 1 } }
-if ($Shell) { & wsl.exe -d $ENGINE_DISTRO; exit $LASTEXITCODE }
+if ($Shell) { & wsl.exe -d $ENGINE_DISTRO --cd ~; exit $LASTEXITCODE }
 if ($Diagnose) { if (Get-EngineDiagnostics) { exit 0 } else { exit 1 } }
 if ($Code)     { if (Open-EngineInVsCode) { exit 0 } else { exit 1 } }
 if ($Attach)   { Show-AttachHelp; exit 0 }
