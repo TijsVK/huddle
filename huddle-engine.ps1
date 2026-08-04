@@ -390,6 +390,20 @@ function Set-VsCodeDockerShim {
         Write-Host "    $probeText" -ForegroundColor DarkGray
         return $false
     }
+    # Which docker does the distro actually resolve? With appendWindowsPath=true a
+    # Windows CLI (Rancher Desktop, Docker Desktop) can shadow /usr/bin/docker and
+    # silently point at the wrong daemon - and it is also what makes VS Code in a
+    # WSL window offer to "install Docker in WSL".
+    $which = (Invoke-Engine -Quiet -Command 'which -a docker > /tmp/hd-which 2>&1') | Out-Null
+    $whichOut = & cmd.exe /c "wsl.exe -d $ENGINE_DISTRO --cd / -- cat /tmp/hd-which" 2>&1
+    $whichText = ($whichOut | Out-String).Trim()
+    if ($whichText -match '/mnt/[a-z]/') {
+        Write-Host "  [!] the distro's PATH also resolves a Windows docker:" -ForegroundColor Yellow
+        $whichText -split "`n" | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+        Write-Host "      The shim calls /usr/bin/docker explicitly, so it is unaffected." -ForegroundColor DarkGray
+        Write-Host "      But turn OFF Rancher/Docker Desktop WSL integration for '$ENGINE_DISTRO'," -ForegroundColor Yellow
+        Write-Host "      or a VS Code window running INSIDE the distro will use the wrong daemon." -ForegroundColor Yellow
+    }
     $names = & cmd.exe /c "`"$shim`" ps --format `"{{.Names}}`"" 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Bad "'docker ps' through the shim failed:"
@@ -494,6 +508,9 @@ function Open-EngineInVsCode {
     Write-Step "opening VS Code in '$ENGINE_DISTRO'"
     & code --remote "wsl+$ENGINE_DISTRO" $Folder
     Write-Ok "VS Code opening. Then: F1 -> 'Dev Containers: Attach to Running Container'"
+    Write-Host "  If VS Code offers to 'install Docker in WSL' (or points at Rancher), set this in the" -ForegroundColor Yellow
+    Write-Host "  Remote [WSL] settings scope so it uses the engine's own CLI:" -ForegroundColor Yellow
+    Write-Host "      `"dev.containers.dockerPath`": `"/usr/bin/docker`"" -ForegroundColor Yellow
     Write-Host "  The container list now comes from the engine daemon, not Docker Desktop." -ForegroundColor DarkGray
     return $true
 }
