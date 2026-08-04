@@ -54,18 +54,21 @@ function Test-HuddleEngine {
 function Invoke-Engine {
     param([Parameter(Mandatory)][string]$Command, [switch]$AsUser, [switch]$Quiet)
     $userArgs = if ($AsUser) { @() } else { @('-u', 'root') }
-    # Out-Host (or $null) keeps the command's OUTPUT out of the pipeline: this
-    # function must return only the exit code. Without it the caller gets an
-    # array of every printed line plus the code, and `-ne 0` is then always true.
+    # Pass the script base64-encoded. PowerShell mangles quotes when it hands
+    # arguments to a native .exe, so any command containing double quotes arrived
+    # at bash half-quoted ("syntax error near unexpected token `('"). The encoded
+    # payload contains no quotes, spaces or shell metacharacters, so nothing can
+    # be re-interpreted on the way in.
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Command))
+    $wrapped = "echo $b64 | base64 -d | bash"
     if ($Quiet) {
-        & wsl.exe -d $ENGINE_DISTRO @userArgs -- bash -lc $Command *> $null
+        & wsl.exe -d $ENGINE_DISTRO @userArgs -- bash -lc $wrapped *> $null
     } else {
-        # NO 2>&1 here: merging stderr into the pipeline turns every stderr line
-        # into an ErrorRecord, so ordinary progress output (docker/buildkit writes
-        # its progress to stderr) is rendered as a NativeCommandError with a
-        # "At line:.. char:.." banner. Unredirected stderr goes straight to the
-        # console instead. Out-Host keeps stdout out of the return value.
-        & wsl.exe -d $ENGINE_DISTRO @userArgs -- bash -lc $Command | Out-Host
+        # NO 2>&1: merging stderr into the pipeline turns every stderr line into
+        # an ErrorRecord, so ordinary progress output (docker/buildkit writes its
+        # progress to stderr) is rendered as a NativeCommandError. Out-Host keeps
+        # stdout out of the return value.
+        & wsl.exe -d $ENGINE_DISTRO @userArgs -- bash -lc $wrapped | Out-Host
     }
     return $LASTEXITCODE
 }
