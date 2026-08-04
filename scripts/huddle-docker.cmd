@@ -6,32 +6,37 @@ REM Docker Desktop's or Rancher Desktop's.
 REM
 REM   "dev.containers.dockerPath": "C:\\path\\to\\scripts\\huddle-docker.cmd"
 REM
-REM Notes:
-REM   /usr/bin/docker : absolute path on purpose. With appendWindowsPath=true the
-REM              distro's PATH also holds the Windows entries, so Rancher/Docker
-REM              Desktop could otherwise shadow the engine's own CLI.
-REM   --cd /   : do not translate the caller's Windows working directory (a UNC or
-REM              network path makes wsl.exe warn, and that warning lands in stdout
-REM              where the extension is parsing JSON).
-REM   no -u    : run as the distro's default user (in the docker group), because
-REM              -u root makes WSL print "Failed to start the systemd user session".
+REM Why the flags:
+REM   /usr/bin/docker : absolute, so a Windows docker on the distro's PATH
+REM                     (Rancher/Docker Desktop) can never shadow the engine's CLI.
+REM   --cd /          : never translate the caller's Windows working directory -
+REM                     that both warns on UNC paths and fails with
+REM                     "chdir(2) failed.: Permission denied" for a non-root user.
+REM   no -u           : run as the distro's default user (in the docker group);
+REM                     a root session makes WSL print a systemd-user-session
+REM                     warning, and stray text breaks callers parsing JSON.
 REM
-REM Debug: set HUDDLE_DOCKER_DEBUG=1 to append every invocation, its exit code and
-REM its first line of output to %TEMP%\huddle-docker.log.
+REM Logging: every invocation is appended to %TEMP%\huddle-docker.log (args, cwd,
+REM exit code) - no output buffering, so `docker exec -it` still streams. Set
+REM HUDDLE_DOCKER_DEBUG=1 to also capture the full output, or HUDDLE_DOCKER_NOLOG=1
+REM to disable logging entirely.
 setlocal
 if "%HUDDLE_ENGINE_DISTRO%"=="" set HUDDLE_ENGINE_DISTRO=huddle-engine
+set LOG=%TEMP%\huddle-docker.log
 
-if not defined HUDDLE_DOCKER_DEBUG goto :run
->>"%TEMP%\huddle-docker.log" echo === %DATE% %TIME% cwd=%CD%
->>"%TEMP%\huddle-docker.log" echo args: %*
-wsl.exe -d %HUDDLE_ENGINE_DISTRO% --cd / -- /usr/bin/docker %* > "%TEMP%\huddle-docker.tmp" 2>&1
+if defined HUDDLE_DOCKER_DEBUG goto :debug
+if not defined HUDDLE_DOCKER_NOLOG >>"%LOG%" echo %DATE% %TIME% cwd=%CD% args: %*
+wsl.exe -d %HUDDLE_ENGINE_DISTRO% --cd / -- /usr/bin/docker %*
 set RC=%ERRORLEVEL%
->>"%TEMP%\huddle-docker.log" echo exit: %RC%
->>"%TEMP%\huddle-docker.log" echo out : 
-type "%TEMP%\huddle-docker.tmp" >>"%TEMP%\huddle-docker.log"
-type "%TEMP%\huddle-docker.tmp"
+if not defined HUDDLE_DOCKER_NOLOG >>"%LOG%" echo %DATE% %TIME% exit=%RC%
 exit /b %RC%
 
-:run
-wsl.exe -d %HUDDLE_ENGINE_DISTRO% --cd / -- /usr/bin/docker %*
-exit /b %ERRORLEVEL%
+:debug
+>>"%LOG%" echo === %DATE% %TIME% cwd=%CD%
+>>"%LOG%" echo args: %*
+wsl.exe -d %HUDDLE_ENGINE_DISTRO% --cd / -- /usr/bin/docker %* > "%TEMP%\huddle-docker.tmp" 2>&1
+set RC=%ERRORLEVEL%
+>>"%LOG%" echo exit: %RC%
+type "%TEMP%\huddle-docker.tmp" >>"%LOG%"
+type "%TEMP%\huddle-docker.tmp"
+exit /b %RC%
