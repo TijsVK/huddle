@@ -82,6 +82,35 @@ else
   }
 fi
 
+# -- 2c. fuse3 / fusermount3 ---------------------------------------------------
+# sysbox-fs virtualizes /proc and /sys over FUSE and shells out to fusermount3.
+# Without it EVERY sysbox container dies at
+#   "failed to pre-register with sysbox-fs ... Initialization error"
+# and sysbox-fs logs: fusermount: exec: "fusermount3": executable file not found.
+# The sysbox package only depends on 'fuse' (FUSE 2) on some distros, so check
+# this unconditionally - an engine that already has sysbox skips the install path.
+info "checking fusermount3 (sysbox-fs FUSE helper)"
+if command -v fusermount3 >/dev/null 2>&1; then
+  ok "fusermount3 present ($(command -v fusermount3))"
+else
+  if [ $CHECK_ONLY -eq 1 ]; then
+    no "fusermount3 MISSING - install fuse3 (every sysbox container will fail without it)"
+  else
+    info "installing fuse3"
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends fuse3 >/dev/null 2>&1
+    if command -v fusermount3 >/dev/null 2>&1; then
+      ok "fuse3 installed ($(command -v fusermount3))"
+      # sysbox-fs caches the lookup failure; restart the stack so it picks it up.
+      systemctl restart sysbox >/dev/null 2>&1 || true
+      sleep 2
+      ok "sysbox restarted so sysbox-fs picks up fusermount3"
+    else
+      no "could not install fuse3 - sysbox containers will not start"
+    fi
+  fi
+fi
+
 # -- 3. sysbox ----------------------------------------------------------------
 info "checking sysbox"
 if command -v sysbox-runc >/dev/null 2>&1 && systemctl is-active --quiet sysbox 2>/dev/null; then

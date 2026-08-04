@@ -1,7 +1,7 @@
 import { initDb } from './db';
 import { createProxyServer } from './proxy';
 import { createApiServer } from './api';
-import { listDevcontainers, networkExists, connectNetwork, refreshContainerIptables, inspectContainer, needsMigration, DIND_ENABLED } from './docker';
+import { listDevcontainers, networkExists, connectNetwork, refreshContainerIptables, inspectContainer, needsMigration, DIND_ENABLED, SYSBOX_ENABLED } from './docker';
 import { createContainerProxy } from './socket-proxy';
 import { ensureDindSidecar } from './dind';
 import { initRootGrants } from './root-grant';
@@ -48,13 +48,19 @@ async function initContainerProxies(): Promise<void> {
   try {
     const containers = await listDevcontainers();
     for (const c of containers) {
+      if (SYSBOX_ENABLED) {
+        // Sysbox: dockerd draait IN de devcontainer. Geen socket-proxy en geen
+        // sidecar om te herstellen — de vorige code maakte hier alsnog een
+        // socket-proxy aan ("restored 1 proxy socket(s)" in sysbox-modus).
+        continue;
+      }
       if (DIND_ENABLED) {
         await ensureDindSidecar(c.name, c.id);
       } else {
         await createContainerProxy(c.name, SOCKET_DIR);
       }
     }
-    if (containers.length) {
+    if (containers.length && !SYSBOX_ENABLED) {
       console.log(
         DIND_ENABLED
           ? `[dind] restored ${containers.length} private-daemon sidecar(s)`
