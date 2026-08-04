@@ -363,11 +363,35 @@ function Set-VsCodeDockerShim {
     Write-Step "VS Code docker shim"
     Write-Host "  shim: $shim" -ForegroundColor DarkGray
 
-    # sanity: does the shim actually reach the engine?
+    # Run the exact probes the Dev Containers extension runs, and check them the
+    # way it does. 'docker returned an error / make sure the docker daemon is
+    # running' usually means stray text (a wsl.exe warning) landed in stdout where
+    # the extension expects pure JSON.
+    $probe = & cmd.exe /c "`"$shim`" version --format {{json .}}" 2>&1
+    $probeText = ($probe | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        Write-Bad "the shim could not reach the engine (exit $LASTEXITCODE):"
+        Write-Host "    $probeText" -ForegroundColor DarkGray
+        return $false
+    }
+    if (-not $probeText.StartsWith('{')) {
+        Write-Bad "the shim returned non-JSON output - this is what breaks the extension:"
+        $probeText -split "`n" | Select-Object -First 5 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        Write-Host "  Anything printed before the JSON (wsl warnings, motd, shell rc output) must go." -ForegroundColor Yellow
+        return $false
+    }
+    try {
+        $ver = $probeText | ConvertFrom-Json
+        Write-Ok "shim speaks docker: server $($ver.Server.Version), client $($ver.Client.Version)"
+    } catch {
+        Write-Bad "the shim's JSON did not parse: $($_.Exception.Message)"
+        Write-Host "    $probeText" -ForegroundColor DarkGray
+        return $false
+    }
     $names = & cmd.exe /c "`"$shim`" ps --format {{.Names}}" 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Bad "the shim could not reach the engine:"
-        Write-Host "    $names" -ForegroundColor DarkGray
+        Write-Bad "'docker ps' through the shim failed:"
+        Write-Host "    $(($names | Out-String).Trim())" -ForegroundColor DarkGray
         return $false
     }
     Write-Ok "shim reaches the engine (containers: $((($names | Where-Object { $_ }) -join ', ')))"
