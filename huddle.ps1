@@ -241,7 +241,10 @@ function Invoke-ImageBuild {
         $df  = ConvertTo-EnginePath $Dockerfile
         $ctx = ConvertTo-EnginePath $Context
         $arg = if ($WithDockerEngine) { '--build-arg HUDDLE_DOCKER_ENGINE=1 ' } else { '' }
-        $rc = Invoke-Engine -Command "docker build ${arg}-t $Tag -f '$df' '$ctx'"
+        # BUILDKIT_PROGRESS=plain: the default progress renderer uses carriage
+        # returns and ANSI, which becomes an unreadable staircase once it crosses
+        # the wsl.exe -> PowerShell console boundary.
+        $rc = Invoke-Engine -Command "cd '$ctx' && BUILDKIT_PROGRESS=plain docker build ${arg}-t $Tag -f '$df' '$ctx'"
         return ($rc -eq 0)
     }
     & $RUNTIME build -t $Tag -f $Dockerfile $Context --no-cache

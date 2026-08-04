@@ -59,7 +59,12 @@ function Invoke-Engine {
     if ($Quiet) {
         & wsl.exe -d $ENGINE_DISTRO @userArgs -- bash -lc $Command *> $null
     } else {
-        & wsl.exe -d $ENGINE_DISTRO @userArgs -- bash -lc $Command 2>&1 | Out-Host
+        # NO 2>&1 here: merging stderr into the pipeline turns every stderr line
+        # into an ErrorRecord, so ordinary progress output (docker/buildkit writes
+        # its progress to stderr) is rendered as a NativeCommandError with a
+        # "At line:.. char:.." banner. Unredirected stderr goes straight to the
+        # console instead. Out-Host keeps stdout out of the return value.
+        & wsl.exe -d $ENGINE_DISTRO @userArgs -- bash -lc $Command | Out-Host
     }
     return $LASTEXITCODE
 }
@@ -164,7 +169,7 @@ function Start-HuddleOnEngine {
 
     if (-not $SkipBuild) {
         Write-Step "building the gateway image inside the engine"
-        if ((Invoke-Engine -Command "cd '$repo' && docker build -t $Image ./gateway") -ne 0) {
+        if ((Invoke-Engine -Command "cd '$repo' && BUILDKIT_PROGRESS=plain docker build -t $Image ./gateway") -ne 0) {
             Write-Bad "gateway image build failed"; return $false
         }
         Write-Ok "gateway image '$Image' built"
