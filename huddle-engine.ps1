@@ -20,7 +20,9 @@ param(
     [switch]$Code,
     [switch]$Attach,
     [switch]$Up,
-    [switch]$Keepalive
+    [switch]$Keepalive,
+    [switch]$VsCode,
+    [switch]$Apply
 )
 
 # NB: do NOT set $ErrorActionPreference here. huddle.ps1 dot-sources this file,
@@ -348,6 +350,55 @@ function Get-EngineDiagnostics {
 
 
 
+
+# Let the STOCK VS Code on Windows attach to devcontainers that live on the engine.
+# The Dev Containers extension shells out to a docker CLI; point it at a shim that
+# forwards to the engine's daemon over wsl.exe. No TCP socket, no sshd, no
+# Remote-WSL window needed.
+function Set-VsCodeDockerShim {
+    param([switch]$Apply)
+    $shim = Join-Path $PSScriptRoot 'scripts\huddle-docker.cmd'
+    if (-not (Test-Path $shim)) { Write-Bad "shim not found at $shim"; return $false }
+    Write-Step "VS Code docker shim"
+    Write-Host "  shim: $shim" -ForegroundColor DarkGray
+
+    # sanity: does the shim actually reach the engine?
+    $names = & cmd.exe /c "`"$shim`" ps --format {{.Names}}" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Bad "the shim could not reach the engine:"
+        Write-Host "    $names" -ForegroundColor DarkGray
+        return $false
+    }
+    Write-Ok "shim reaches the engine (containers: $((($names | Where-Object { $_ }) -join ', ')))"
+
+    $settings = Join-Path $env:APPDATA 'Code\User\settings.json'
+    $escaped = $shim -replace '\\', '\\\\'
+    Write-Host ""
+    Write-Host "  Add to VS Code settings.json ($settings):" -ForegroundColor White
+    Write-Host "      `"dev.containers.dockerPath`": `"$escaped`"" -ForegroundColor Yellow
+    Write-Host "  Then: F1 -> Developer: Reload Window, and F1 -> Dev Containers: Attach to Running Container" -ForegroundColor DarkGray
+    Write-Host "  (Undo later by removing that setting; Docker Desktop is untouched.)" -ForegroundColor DarkGray
+
+    if (-not $Apply) {
+        Write-Host ""
+        Write-Host "  Re-run with -Apply to write that setting automatically." -ForegroundColor DarkGray
+        return $true
+    }
+    if (-not (Test-Path $settings)) { Write-Bad "settings.json not found at $settings - add the line manually"; return $false }
+    try {
+        $raw = Get-Content $settings -Raw
+        $json = $raw | ConvertFrom-Json -ErrorAction Stop            # fails on JSONC comments
+        $json | Add-Member -NotePropertyName 'dev.containers.dockerPath' -NotePropertyValue $shim -Force
+        Copy-Item $settings "$settings.huddle-backup" -Force
+        ($json | ConvertTo-Json -Depth 32) | Set-Content $settings -Encoding UTF8
+        Write-Ok "settings.json updated (backup: $settings.huddle-backup). Reload the VS Code window."
+        return $true
+    } catch {
+        Write-Bad "could not edit settings.json automatically ($($_.Exception.Message)) - add the line manually"
+        return $false
+    }
+}
+
 # Bring everything back after the distro (or Windows) restarted, without a
 # full re-init: boot the distro, keepalive, dockerd, then the gateway itself.
 function Start-EngineStack {
@@ -423,13 +474,14 @@ function Show-AttachHelp {
 
 # Standalone entry points. Strict mode only applies when this script is RUN,
 # not when huddle.ps1 dot-sources it.
-if ($Setup -or $Check -or $Shell -or $Diagnose -or $Code -or $Attach -or $Up -or $Keepalive) { $ErrorActionPreference = 'Stop' }
+if ($Setup -or $Check -or $Shell -or $Diagnose -or $Code -or $Attach -or $Up -or $Keepalive -or $VsCode) { $ErrorActionPreference = 'Stop' }
 if ($Setup) { if (Initialize-HuddleEngine -RepoRoot $PSScriptRoot) { exit 0 } else { exit 1 } }
 if ($Check) { if (Test-EngineReady) { exit 0 } else { exit 1 } }
 if ($Shell) { & wsl.exe -d $ENGINE_DISTRO; exit $LASTEXITCODE }
 if ($Diagnose) { if (Get-EngineDiagnostics) { exit 0 } else { exit 1 } }
 if ($Code)     { if (Open-EngineInVsCode) { exit 0 } else { exit 1 } }
 if ($Attach)   { Show-AttachHelp; exit 0 }
+if ($VsCode)   { if (Set-VsCodeDockerShim -Apply:$Apply) { exit 0 } else { exit 1 } }
 if ($Up)       { if (Start-EngineStack) { exit 0 } else { exit 1 } }
 if ($Keepalive) {
     if (Start-EngineKeepalive -Verbose2) {
