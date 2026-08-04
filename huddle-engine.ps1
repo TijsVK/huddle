@@ -409,7 +409,8 @@ function Set-VsCodeDockerShim {
         $whichText -split "`n" | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
         Write-Host "      The shim calls /usr/bin/docker explicitly, so it is unaffected." -ForegroundColor DarkGray
         Write-Host "      A VS Code window running INSIDE the distro can pick that one instead. Fix with either:" -ForegroundColor Yellow
-        Write-Host "        rdctl set --WSL.integrations.$ENGINE_DISTRO=false     (Rancher Desktop CLI)" -ForegroundColor Yellow
+        Write-Host "        rdctl api /v1/settings -X PUT -b '{\"WSL\":{\"integrations\":{\"$ENGINE_DISTRO\":false}}}'" -ForegroundColor Yellow
+        Write-Host "          (the 'rdctl set --WSL.integrations.<distro>' flag only exists in some versions)" -ForegroundColor DarkGray
         Write-Host "        .\huddle-engine.ps1 -IsolatePath                       (drop the Windows PATH entirely)" -ForegroundColor Yellow
     }
     $names = & cmd.exe /c "`"$shim`" ps --format `"{{.Names}}`"" 2>&1
@@ -491,7 +492,7 @@ function Disable-EngineWindowsPath {
     Write-Ok "done - restart the stack with: .\huddle-engine.ps1 -Up"
     Write-Host "  Verify afterwards:  wsl -d $ENGINE_DISTRO -- which -a docker   (only /usr/bin/docker)" -ForegroundColor DarkGray
     Write-Host "  If Rancher Desktop still injects itself, disable its integration for this distro:" -ForegroundColor DarkGray
-    Write-Host "      rdctl set --WSL.integrations.$ENGINE_DISTRO=false" -ForegroundColor DarkGray
+    Write-Host "      rdctl api /v1/settings -X PUT -b '{\"WSL\":{\"integrations\":{\"$ENGINE_DISTRO\":false}}}'" -ForegroundColor DarkGray
     return $true
 }
 
