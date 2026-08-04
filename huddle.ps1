@@ -221,13 +221,41 @@ function Initialize-Huddle {
     }
 }
 
+# ── Image bouwen op de JUISTE daemon ─────────────────────────────────────────
+# Klassiek/DinD: de lokale docker (Docker Desktop).
+# Sysbox: de ENGINE HOST (WSL2-distro). Daar draaien de devcontainers, dus daar
+# moeten de images ook staan — en de base image heeft dan een echte docker-engine
+# nodig (HUDDLE_DOCKER_ENGINE=1), niet alleen de CLI.
+function Invoke-ImageBuild {
+    param(
+        [Parameter(Mandatory)][string]$Tag,
+        [Parameter(Mandatory)][string]$Dockerfile,   # pad op Windows
+        [Parameter(Mandatory)][string]$Context,      # pad op Windows
+        [switch]$WithDockerEngine
+    )
+    if ($SYSBOX_MODE) {
+        if (-not (Get-Command Invoke-Engine -ErrorAction SilentlyContinue)) {
+            Write-Host "  [FAIL] huddle-engine.ps1 niet geladen; kan niet op de engine bouwen." -ForegroundColor Red
+            return $false
+        }
+        $df  = ConvertTo-EnginePath $Dockerfile
+        $ctx = ConvertTo-EnginePath $Context
+        $arg = if ($WithDockerEngine) { '--build-arg HUDDLE_DOCKER_ENGINE=1 ' } else { '' }
+        $rc = Invoke-Engine -Command "docker build ${arg}-t $Tag -f '$df' '$ctx'"
+        return ($rc -eq 0)
+    }
+    & $RUNTIME build -t $Tag -f $Dockerfile $Context --no-cache
+    return ($LASTEXITCODE -eq 0)
+}
+
 # ── Build Huddle image ────────────────────────────────────────────────────────
 
 function Build-HuddleImage {
     $scriptDir = $PSScriptRoot
     Write-Host "  Image '${HUDDLE_IMAGE}' bouwen..." -ForegroundColor DarkCyan
-    & $RUNTIME build -t $HUDDLE_IMAGE (Join-Path $scriptDir "gateway") --no-cache
-    if ($LASTEXITCODE -eq 0) {
+    $gwDir = Join-Path $scriptDir "gateway"
+    $built = Invoke-ImageBuild -Tag $HUDDLE_IMAGE -Dockerfile (Join-Path $gwDir 'Dockerfile') -Context $gwDir
+    if ($built) {
         Write-Host "  [OK] Image '${HUDDLE_IMAGE}' klaar." -ForegroundColor Green
     } else {
         Write-Host "  [FAIL] Build mislukt." -ForegroundColor Red
@@ -435,8 +463,7 @@ function Build-SharedBase {
     $dockerfile = Join-Path $ScriptDir 'base-devimage\Dockerfile'
     Write-Host "  Gedeelde base image 'ghcr.io/infosupport/base-devimage' bouwen..." -ForegroundColor DarkCyan
     # Build-context = repo-root zodat de Dockerfile `COPY .ai/…` kan; Dockerfile via -f.
-    & $RUNTIME build -t ghcr.io/infosupport/base-devimage -f $dockerfile $ScriptDir --no-cache
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Invoke-ImageBuild -Tag 'ghcr.io/infosupport/base-devimage' -Dockerfile $dockerfile -Context $ScriptDir -WithDockerEngine:$SYSBOX_MODE)) {
         Write-Host "  [FAIL] Build van base-devimage mislukt." -ForegroundColor Red
         return $false
     }
@@ -468,8 +495,8 @@ function Build-BaseImage {
     }
     Write-Host "  Image '$($ide.Image)' bouwen ($($ide.Display))..." -ForegroundColor DarkCyan
     # Build-context = repo-root zodat de Dockerfile `COPY .ai/…` kan; Dockerfile via -f.
-    & $RUNTIME build -t $ide.Image -f (Join-Path $buildPath 'Dockerfile') $scriptDir --no-cache
-    if ($LASTEXITCODE -eq 0) {
+    $built = Invoke-ImageBuild -Tag $ide.Image -Dockerfile (Join-Path $buildPath 'Dockerfile') -Context $scriptDir
+    if ($built) {
         Write-Host "  [OK] Image '$($ide.Image)' klaar." -ForegroundColor Green
     } else {
         Write-Host "  [FAIL] Build mislukt." -ForegroundColor Red
