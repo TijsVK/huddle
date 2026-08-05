@@ -372,9 +372,38 @@ function Get-EngineDiagnostics {
 # forwards to the engine's daemon over wsl.exe. No TCP socket, no sshd, no
 # Remote-WSL window needed.
 
+
+# Compile the docker shim to a real .exe. A .cmd cannot be used: cmd.exe prints
+# "UNC paths are not supported. Defaulting to Windows directory." on STDOUT before
+# the batch file runs whenever its working directory is a UNC path - which is what
+# VS Code uses for remote/attached windows - and the Dev Containers extension
+# parses that output as JSON. Proven on a real box: identical call, .cmd emits the
+# preamble, .exe does not.
+function Build-DockerShimExe {
+    $src = Join-Path $PSScriptRoot 'scripts\huddle-docker.cs'
+    if (-not (Test-Path $src)) { Write-Bad "shim source not found at $src"; return $null }
+    $dir = Join-Path $env:LOCALAPPDATA 'huddle'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $exe = Join-Path $dir 'huddle-docker.exe'
+    if ((Test-Path $exe) -and (Get-Item $exe).LastWriteTime -gt (Get-Item $src).LastWriteTime) { return $exe }
+
+    # csc.exe ships with the .NET Framework that is present on every Windows box,
+    # so no SDK or project file is required.
+    $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    if (-not (Test-Path $csc)) { $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe' }
+    if (-not (Test-Path $csc)) { Write-Bad "csc.exe not found - falling back to the .cmd shim"; return $null }
+    Write-Step "compiling the docker shim"
+    & $csc /nologo /optimize+ ("/out:" + $exe) $src | Out-Host
+    if (-not (Test-Path $exe)) { Write-Bad "shim compilation failed"; return $null }
+    Write-Ok "built $exe"
+    return $exe
+}
+
 function Set-VsCodeDockerShim {
     param([switch]$Apply)
-    $shim = Join-Path $PSScriptRoot 'scripts\huddle-docker.cmd'
+    # Prefer the compiled shim; the .cmd stays as a fallback for manual use.
+    $shim = Build-DockerShimExe
+    if (-not $shim) { $shim = Join-Path $PSScriptRoot 'scripts\huddle-docker.cmd' }
     if (-not (Test-Path $shim)) { Write-Bad "shim not found at $shim"; return $false }
     Write-Step "VS Code docker shim"
     Write-Host "  shim: $shim" -ForegroundColor DarkGray

@@ -742,6 +742,16 @@ chmod 644 /etc/profile.d/99-huddle-aspire.sh
 
 ${sysboxDockerdBootstrap(SYSBOX_ENABLED)}
 
+# VS Code's devcontainer set-up appends the remote env to /etc/environment while
+# running as the NON-root container user. Under sysbox that file shows up owned by
+# nobody:nogroup (ID-mapped image layer), so the append fails with "cannot create
+# /etc/environment: Permission denied" and the whole attach errors out. VS Code
+# only skips the step once its marker exists, which is why a second attempt
+# succeeds - make the first one work instead.
+touch /etc/environment 2>/dev/null || true
+chown vscode:vscode /etc/environment 2>/dev/null || true
+chmod 0664 /etc/environment 2>/dev/null || true
+
 ${IDE_CRED_SCRUB}
 
 # De JetBrains-IDE (IntelliJ/Rider) draait op de JBR, een eigen JVM die TLS niet
@@ -883,6 +893,16 @@ printf 'export ASPIRE_ALLOW_UNSECURED_TRANSPORT=true\\n' > /etc/profile.d/99-hud
 chmod 644 /etc/profile.d/99-huddle-aspire.sh
 
 ${sysboxDockerdBootstrap(SYSBOX_ENABLED)}
+
+# VS Code's devcontainer set-up appends the remote env to /etc/environment while
+# running as the NON-root container user. Under sysbox that file shows up owned by
+# nobody:nogroup (ID-mapped image layer), so the append fails with "cannot create
+# /etc/environment: Permission denied" and the whole attach errors out. VS Code
+# only skips the step once its marker exists, which is why a second attempt
+# succeeds - make the first one work instead.
+touch /etc/environment 2>/dev/null || true
+chown vscode:vscode /etc/environment 2>/dev/null || true
+chmod 0664 /etc/environment 2>/dev/null || true
 
 ${IDE_CRED_SCRUB}
 

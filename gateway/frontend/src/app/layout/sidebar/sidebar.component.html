@@ -19,10 +19,12 @@
       <app-icon name="globe" [size]="20" />
       <span>Firewall</span>
     </a>
-    <a class="nav__item" routerLink="docker-access" routerLinkActive="nav__item--active">
-      <app-icon name="anchor" [size]="20" />
-      <span>Docker permissions</span>
-    </a>
+    @if (showDockerPermissions()) {
+      <a class="nav__item" routerLink="docker-access" routerLinkActive="nav__item--active">
+        <app-icon name="anchor" [size]="20" />
+        <span>Docker permissions</span>
+      </a>
+    }
 <a class="nav__item" routerLink="network-log" routerLinkActive="nav__item--active">
       <app-icon name="file-text" [size]="20" />
       <span>Network log</span>
