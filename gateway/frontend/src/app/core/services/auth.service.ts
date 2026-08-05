@@ -35,6 +35,10 @@ export class AuthService {
     try {
       await firstValueFrom(this.http.post('/api/auth/login', { token }));
       this.authenticated.set(true);
+      // Ook de isolatie-modus ophalen: bij de auto-login (?token=...) werd login()
+      // aangeroepen zonder ooit /api/auth/status te lezen, dus bleef `mode` null en
+      // toonde de sidebar 'Docker permissions' ook in sysbox-modus.
+      void this.refresh();
       return true;
     } catch {
       this.authenticated.set(false);
