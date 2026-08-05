@@ -114,9 +114,12 @@ function Set-EngineWslConf {
     # attaches to containers on the engine daemon. Only rewrite + restart when
     # something is actually wrong: terminating the distro kills the gateway and
     # every devcontainer.
+    # PRESERVE appendWindowsPath: an earlier version forced it back to 'true', so
+    # every -Setup silently undid -IsolatePath and let Rancher's docker back onto
+    # the engine's PATH.
     $okSystemd = (Invoke-Engine -Quiet -Command 'grep -q "^systemd=true" /etc/wsl.conf 2>/dev/null') -eq 0
-    $okPath    = (Invoke-Engine -Quiet -Command 'grep -q "^appendWindowsPath=false" /etc/wsl.conf 2>/dev/null') -ne 0
-    if ($okSystemd -and $okPath) {
+    $hasPathLine = (Invoke-Engine -Quiet -Command 'grep -q "^appendWindowsPath=" /etc/wsl.conf 2>/dev/null') -eq 0
+    if ($okSystemd -and $hasPathLine) {
         Write-Ok "wsl.conf already correct in '$ENGINE_DISTRO' (left running)"
         return $true
     }
@@ -127,7 +130,8 @@ function Set-EngineWslConf {
     # wsl.conf wholesale would silently put every session back to root.
     # Single-quoted PowerShell string: the payload is bash and must not be touched.
     $cmd = 'u=$(sed -n "s/^default=//p" /etc/wsl.conf 2>/dev/null | head -1); ' +
-           'printf "%s\n" "[boot]" "systemd=true" "" "[interop]" "enabled=true" "appendWindowsPath=true" > /etc/wsl.conf; ' +
+           'awp=$(sed -n "s/^appendWindowsPath=//p" /etc/wsl.conf 2>/dev/null | head -1); [ -n "$awp" ] || awp=true; ' +
+           'printf "%s\n" "[boot]" "systemd=true" "" "[interop]" "enabled=true" "appendWindowsPath=$awp" > /etc/wsl.conf; ' +
            'if [ -n "$u" ]; then printf "%s\n" "" "[user]" "default=$u" >> /etc/wsl.conf; ' +
            'printf "%s\n" "" "[automount]" "enabled=true" "options=metadata,uid=$(id -u $u),gid=$(id -g $u),umask=022" >> /etc/wsl.conf; fi; ' +
            'sed -i "s/\r$//" /etc/wsl.conf; true'
