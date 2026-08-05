@@ -261,3 +261,68 @@ Add a Docker server on WSL (`huddle-engine`) under Dev Containers. Not yet verif
 - Parse-check before shipping: `pwsh` runs on Linux, so
   `[System.Management.Automation.Language.Parser]::ParseFile()` catches syntax errors without a
   Windows box.
+
+
+---
+
+# Windows bring-up: WORKING (2026-08-05)
+
+Verified on a real Windows 11 box, driven end to end:
+
+| Piece | State |
+|---|---|
+| Engine distro (`huddle-engine`, Ubuntu 24.04) | docker 29.7.1 + sysbox-ce 0.7.1, systemd, user `huddle` in docker group |
+| Gateway | container `huddle`, `--restart unless-stopped`, portal on `http://localhost:3000` |
+| Devcontainer | `runtime=sysbox-runc`, `restart=unless-stopped`, `uid_map 0 100000 65536` |
+| Docker inside the devcontainer | **29.7.1, unprivileged, own `/var/lib/docker` volume** |
+| VS Code (stock, on Windows) | attaches, installs its server inside the sandbox, loads extensions |
+| Docker permissions UI | hidden in sysbox/dind mode (redundant by design) |
+
+## The two things that made the IDE attach work
+
+1. **The docker shim must be an `.exe`, not a `.cmd`.** `cmd.exe` writes
+   ```
+   'x' CMD.EXE was started with the above path as the current directory.
+   UNC paths are not supported.  Defaulting to Windows directory.
+   ```
+   to **stdout, before the batch file runs**, whenever its working directory is a UNC path — which is
+   what VS Code uses for remote/attached windows. Dev Containers parses
+   `docker version --format {{json .}}` and `docker inspect` as JSON, so that preamble produced
+   "docker returned an error / make sure the docker daemon is running". A batch file cannot suppress
+   its own interpreter's output. `scripts/huddle-docker.cs` is compiled by the `csc.exe` that ships
+   with Windows (`-VsCode` does it into `%LOCALAPPDATA%\huddle`) and pumps stdio, since VS Code
+   spawns it without a console.
+2. **`/etc/environment` must be writable by the container user.** Under sysbox it appears owned by
+   `nobody:nogroup` (ID-mapped image layer) and VS Code patches it as the non-root user; the first
+   attach failed, and only succeeded on retry because VS Code had written its
+   `.patchEtcEnvironmentMarker`. The config script now fixes the ownership.
+
+## Rancher Desktop is actively hostile to this setup
+
+With `appendWindowsPath=true`, Rancher's Linux bin dir joins the engine's PATH and brings
+`docker-credential-secretservice`, which cannot load `libsecret` in a headless distro — so **every
+image pull and build fails** with `error getting credentials - err: exit status 127`. Its `docker`
+also shadows `/usr/bin/docker` for anything running inside the distro. Fix:
+`.\huddle-engine.ps1 -IsolatePath` (sets `appendWindowsPath=false`). `-Setup` preserves that
+value now; an earlier version reset it to `true` and silently undid the fix.
+
+## Operational notes
+
+- The engine distro is torn down by WSL whenever no client is attached; `-Keepalive` holds one open.
+  Both the gateway and the devcontainers carry `--restart unless-stopped`, so they return when
+  dockerd does, but the portal will blink during the cycle.
+- `/proc/uptime` inside a distro is the shared **utility VM's** uptime, not the distro's — it does
+  not reset when the distro restarts, so it cannot be used to detect a cycle.
+- `git` refuses the Windows checkout as root inside the engine until
+  `git config --global --add safe.directory <path>`.
+
+## Still open
+
+- First-attach-without-retry (the `/etc/environment` fix) is committed but not yet re-verified from a
+  clean devcontainer.
+- Aspire and kind have not been run on the Windows engine (both pass on Linux).
+- JetBrains Gateway attach is untested.
+- `huddle migrate` / `needsMigration()` do not know about the sysbox mode yet.
+- Splitting the control plane (portal/API/DB) onto Windows while the proxy stays in the engine —
+  discussed, not started; the internal `dc-net-*` chokepoint is why the proxy must stay next to the
+  devcontainers.
