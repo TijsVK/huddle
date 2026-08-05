@@ -131,7 +131,6 @@ function Set-EngineWslConf {
            'if [ -n "$u" ]; then printf "%s\n" "" "[user]" "default=$u" >> /etc/wsl.conf; ' +
            'printf "%s\n" "" "[automount]" "enabled=true" "options=metadata,uid=$(id -u $u),gid=$(id -g $u),umask=022" >> /etc/wsl.conf; fi; ' +
            'sed -i "s/\r$//" /etc/wsl.conf; true'
-           "sed -i 's/\r$//' /etc/wsl.conf; true"
     if ((Invoke-Engine -Command $cmd) -ne 0) { Write-Bad "could not write /etc/wsl.conf"; return $false }
     & wsl.exe --terminate $ENGINE_DISTRO | Out-Null
     Write-Ok "wsl.conf written (distro restarted so it takes effect)"
@@ -494,7 +493,6 @@ function Disable-EngineWindowsPath {
            'if [ -n "$u" ]; then printf "%s\n" "" "[user]" "default=$u" >> /etc/wsl.conf; ' +
            'printf "%s\n" "" "[automount]" "enabled=true" "options=metadata,uid=$(id -u $u),gid=$(id -g $u),umask=022" >> /etc/wsl.conf; fi; ' +
            'sed -i "s/\r$//" /etc/wsl.conf; true'
-           "sed -i 's/\r$//' /etc/wsl.conf; true"
     if ((Invoke-Engine -Command $cmd) -ne 0) { Write-Bad "could not write /etc/wsl.conf"; return $false }
     & wsl.exe --terminate $ENGINE_DISTRO | Out-Null
     Write-Ok "done - restart the stack with: .\huddle-engine.ps1 -Up"
