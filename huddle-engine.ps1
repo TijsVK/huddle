@@ -217,6 +217,19 @@ function Stop-EngineDevcontainers {
     Invoke-Engine -Quiet -Command 'docker stop -t 20 $(docker ps -q --filter label=com.intellij.devcontainer.id) >/dev/null 2>&1; true' | Out-Null
 }
 
+# THE safe way to put the engine away: stop the devcontainers before the distro
+# goes down, so they still work tomorrow. Pulling the distro out from under a
+# running sysbox container leaves its uid-shift half-applied; huddle-sysbox-repair
+# fixes that at the next boot, but not having to is better.
+function Stop-HuddleEngine {
+    if (-not (Test-HuddleEngine)) { Write-Bad "distro '$ENGINE_DISTRO' does not exist"; return $false }
+    Stop-EngineDevcontainers
+    Stop-EngineKeepalive
+    & wsl.exe --terminate $ENGINE_DISTRO | Out-Null
+    Write-Ok "engine '$ENGINE_DISTRO' stopped cleanly - devcontainers will start again with -Up"
+    return $true
+}
+
 function Test-EngineKeepalive {
     return ((Invoke-Engine -Quiet -Command 'pgrep -f huddle-engine-keepalive >/dev/null 2>&1') -eq 0)
 }
@@ -647,16 +660,7 @@ if ($Attach)   { Show-AttachHelp; exit 0 }
 if ($VsCode)   { if (Set-VsCodeDockerShim -Apply:$Apply) { exit 0 } else { exit 1 } }
 if ($IsolatePath) { if (Disable-EngineWindowsPath) { exit 0 } else { exit 1 } }
 if ($Up)       { if (Start-EngineStack) { exit 0 } else { exit 1 } }
-if ($Down) {
-    # THE safe way to put the engine away: stop the devcontainers before the
-    # distro goes down, so they still work tomorrow. Pulling the distro out from
-    # under a running sysbox container breaks it permanently.
-    Stop-EngineDevcontainers
-    Stop-EngineKeepalive
-    & wsl.exe --terminate $ENGINE_DISTRO | Out-Null
-    Write-Ok "engine '$ENGINE_DISTRO' stopped cleanly - devcontainers will start again with -Up"
-    exit 0
-}
+if ($Down) { Stop-HuddleEngine | Out-Null; exit 0 }
 if ($Keepalive) {
     if (Start-EngineKeepalive -Verbose2) {
         Invoke-Engine -Command 'pgrep -af huddle-engine-keepalive' | Out-Null

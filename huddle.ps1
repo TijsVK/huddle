@@ -152,6 +152,7 @@ function Show-Menu {
     Write-Host "   4  Huddle bouwen en herinitialiseren (CLI, no-pull)" -ForegroundColor White
     Write-Host "   5  Tests draaien (unit + e2e)" -ForegroundColor White
     Write-Host "   6  Sysbox engine host opzetten/controleren (WSL2)" -ForegroundColor White
+    Write-Host "   7  Engine netjes stoppen (doe dit voor je Windows herstart)" -ForegroundColor White
     Write-Host "  -----------------------------------------" -ForegroundColor DarkGray
     Write-Host "   r  Status verversen (Enter doet hetzelfde)" -ForegroundColor White
     Write-Host "  -----------------------------------------" -ForegroundColor DarkGray
@@ -682,6 +683,17 @@ while ($running) {
                     $env:HUDDLE_SYSBOX = '1'
                     Write-Host "`n  Engine host klaar. Kies 4 om Huddle in sysbox-modus te (her)initialiseren." -ForegroundColor Green
                 }
+            } else {
+                Write-Host "  huddle-engine.ps1 niet gevonden naast huddle.ps1." -ForegroundColor Red
+            }
+            Read-Host "`n  Druk Enter om terug te gaan"
+        }
+        '7' {
+            # Een devcontainer die nog DRAAIT als de distro wordt afgebroken, komt
+            # terug met een halve uid-shift (image op nobody, geen sudo). De engine
+            # repareert dat bij de volgende boot, maar netjes stoppen scheelt dat.
+            if (Get-Command Stop-HuddleEngine -ErrorAction SilentlyContinue) {
+                Stop-HuddleEngine | Out-Null
             } else {
                 Write-Host "  huddle-engine.ps1 niet gevonden naast huddle.ps1." -ForegroundColor Red
             }

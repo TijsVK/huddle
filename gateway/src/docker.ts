@@ -300,6 +300,15 @@ iptables -F OUTPUT 2>/dev/null || true
 iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A OUTPUT -p tcp -d "$HUDDLE_IP" -j ACCEPT
 iptables -A OUTPUT -p tcp -j DROP
+
+# De flush hierboven gooit OOK de bridge-uitzonderingen van de sysbox-modus weg.
+# Zonder die regels is geen enkele published port van een geneste container nog
+# bereikbaar vanuit de devcontainer (Aspire -> SqlServer, compose, Testcontainers),
+# en dit draait bij ELKE start van de gateway - dus na elke engine-reboot en elke
+# 'huddle init'. Meteen ook de docker-client-config herschrijven: die had het
+# huddle-IP van tóen ingebakken, en dit hele script bestaat juist omdat dat IP
+# na een herstart verandert. Idempotent (-C-checks), dus veilig bij herhaling.
+${nestedDaemonNetworkConfig(SYSBOX_ENABLED)}
 `;
   try {
     const exec = await dockerRequest('POST', `/containers/${encodeURIComponent(containerId)}/exec`, {

@@ -124,6 +124,30 @@ JetBrains Gateway: add a Docker server on the WSL distro. Untested.
 - **Installing Sysbox restarts dockerd** and refuses to run while containers exist — it is a
   provisioning step, never a live migration.
 - `/proc/uptime` inside a WSL distro is the shared utility VM's uptime, not the distro's.
+- **Keep workspaces on the engine's own filesystem, not on `C:`.** A directory bind-mounted from a
+  Windows drive shows up inside the devcontainer as `nobody:nogroup`:
+
+  ```
+  bind from /mnt/c/...   -rwxrwxrwx 1 65534 65534  file.txt
+  bind from a Linux path -rw-r--r-- 1 0     0      file.txt
+  ```
+
+  drvfs cannot be ID-mapped, and sysbox never chowns bind mounts ("For bind mounts, we use
+  ID-mapping or shiftfs, but never chown"). Reads and writes still work, because drvfs reports
+  everything as `0777` — but ownership is wrong, which trips git's dubious-ownership check, SSH key
+  permission checks and anything else that verifies file owners. It is also far slower than the
+  distro's ext4.
+- **Disk grows per devcontainer.** Each one has its own `/var/lib/docker` volume for its inner
+  daemon, so images are pulled per devcontainer rather than shared — an Aspire project pulling
+  SqlServer costs ~1.7 GB *each*. A WSL vhdx also never shrinks on its own; reclaim with
+  `wsl --manage huddle-engine --set-sparse true`, and delete devcontainers you no longer need
+  (Huddle removes the volume with the container).
+- **Memory is shared by the whole VM.** The default is 8 GB *per devcontainer* while WSL2 gives the
+  utility VM about half the host's RAM. On a 16 GB laptop one devcontainer can exhaust it; cap the
+  VM in `%USERPROFILE%\.wslconfig` (`[wsl2] memory=...`) and lower the per-container default.
+- Clock skew after a Windows sleep/resume is *not* an issue here: the engine runs systemd, so
+  `systemd-timesyncd` is active and `timedatectl` reports the clock synchronised. (Skew would
+  otherwise break TLS and apt.)
 
 ## Tests
 
