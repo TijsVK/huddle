@@ -4,9 +4,8 @@
 # SqlServer container. Confirms the realistic Aspire path the container-only e2e
 # doesn't: project -> SqlServer connection via Aspire service discovery + the
 # shared-netns loopback, an EF schema create, and a DB round-trip through the
-# project's HTTP endpoint. Also asserts the dashboard/OTLP run on plain http
-# (ASPIRE_ALLOW_UNSECURED_TRANSPORT injected by the gateway) with no gRPC
-# UntrustedRoot — the user-reported "grpc errors on the dashboard" regression.
+# project's HTTP endpoint. Also asserts the dashboard actually boots and its
+# resource-service gRPC works — the user-reported "grpc errors on the dashboard".
 #
 # Requires locally-built huddle-local:dind + $BASE_IMAGE.
 set -uo pipefail
@@ -30,10 +29,6 @@ done
 curl -s -H "$AUTH" -H 'content-type: application/json' -X POST "$API/api/docker/start" -d "{\"imageName\":\"$BASE_IMAGE\",\"containerName\":\"$DC\",\"ideName\":\"vscode\",\"empty\":true}" >/dev/null
 for i in $(seq 1 60); do docker exec -u vscode "$DC" docker version >/dev/null 2>&1 && break; sleep 2; done
 pass "devcontainer started"
-
-# The gateway must have injected ASPIRE_ALLOW_UNSECURED_TRANSPORT (dev-cert gRPC fix).
-docker exec -u vscode "$DC" printenv ASPIRE_ALLOW_UNSECURED_TRANSPORT | grep -q true \
-  && pass "ASPIRE_ALLOW_UNSECURED_TRANSPORT injected by gateway" || { fail "env not injected"; rc=1; }
 
 # ── project (ASP.NET + EF Core) + AppHost ────────────────────────────────────
 docker exec -i -u vscode "$DC" bash -lc 'mkdir -p ~/svc && cat > ~/svc/svc.csproj' <<'CSPROJ'
@@ -88,7 +83,7 @@ log "dotnet restore + build (through the Huddle proxy)"
 docker exec -u vscode "$DC" bash -lc 'cd ~/apphost && dotnet build AppHost.csproj' >/tmp/sbx-aspire-build.log 2>&1 \
   && pass "AppHost + EF project build (nuget via proxy)" || { fail "build (see log)"; tail -15 /tmp/sbx-aspire-build.log>&2; exit 1; }
 
-log "dotnet run (no manual ASPIRE flag — must inherit from the devcontainer env)"
+log "dotnet run"
 docker exec -u vscode "$DC" bash -lc 'cd ~/apphost && setsid bash -c "dotnet run --no-build --project AppHost.csproj > \$HOME/apphost/run.log 2>&1" </dev/null >/dev/null 2>&1 &' >/dev/null 2>&1
 
 # ── wait for SqlServer + the project, then a DB round-trip ────────────────────
@@ -110,7 +105,6 @@ printf '%s' "$result" | grep -q 'hello-from-ef' \
   && pass "project -> SqlServer DB round-trip via Aspire service discovery ($result)" \
   || { fail "no DB round-trip from the project resource ($result)"; rc=1; }
 
-echo "$runlog" | grep -qE "Dashboard:  http://" && pass "dashboard on plain http (unsecured-transport inherited)" || { fail "dashboard not http"; rc=1; }
 echo "$runlog" | grep -qiE "UntrustedRoot|RpcException.*SSL" && { fail "dashboard gRPC UntrustedRoot present"; rc=1; } || pass "no dashboard gRPC UntrustedRoot / cert errors"
 
 # ── ACTUALLY exercise the dashboard (not just log-greps) ──────────────────────
@@ -119,12 +113,16 @@ echo "$runlog" | grep -qiE "UntrustedRoot|RpcException.*SSL" && { fail "dashboar
 # means by "the dashboard doesn't work". So: fetch the dashboard over its login
 # token, assert it serves the Blazor boot markup, then re-read the AppHost log for
 # ANY runtime circuit/gRPC failure (broader than UntrustedRoot).
-dashurl=$(echo "$runlog" | grep -oE 'Login to the dashboard at http://localhost:[0-9]+/login\?t=[a-f0-9]+' | head -1 | grep -oE 'http://localhost:[0-9]+/login\?t=[a-f0-9]+')
+# Scheme-agnostic on purpose: Aspire serves the dashboard over https with the
+# ASP.NET dev cert unless ASPIRE_ALLOW_UNSECURED_TRANSPORT is set, and Huddle does
+# not set it — measured, the gRPC works either way, so the scheme is the app's
+# choice and not something this mode should assert. curl gets -k for the same
+# reason: an untrusted dev cert is expected and is not what's under test here.
+dashurl=$(echo "$runlog" | grep -oE 'https?://localhost:[0-9]+/login\?t=[a-f0-9]+' | head -1)
 if [ -n "$dashurl" ]; then
-  dashport=$(printf '%s' "$dashurl" | grep -oE 'localhost:[0-9]+' | cut -d: -f2)
   # follow the login redirect to the app root; Blazor Server pages ship a
   # blazor.web.js / _framework boot script + a data-reconnect-ui circuit marker.
-  html=$(docker exec -u vscode "$DC" bash -lc "curl -s -m10 -L --cookie-jar /tmp/dj --cookie /tmp/dj '$dashurl'" 2>/dev/null)
+  html=$(docker exec -u vscode "$DC" bash -lc "curl -sk -m10 -L --cookie-jar /tmp/dj --cookie /tmp/dj '$dashurl'" 2>/dev/null)
   printf '%s' "$html" | grep -qiE '_framework/blazor|blazor\.web\.js|components-reconnect' \
     && pass "dashboard Blazor UI boots (served circuit markup)" \
     || { fail "dashboard did not serve Blazor markup (UI broken?)"; rc=1; log "--- dashboard html head ---"; printf '%s' "$html" | head -c 400 >&2; }
