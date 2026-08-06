@@ -23,9 +23,9 @@ interface DetailData {
   globalRules: Rule[];
   huddleInNetwork?: boolean;
   airlocked?: boolean;
-  /** Sysbox: de uid-shift van deze container is weg (host ging onderuit terwijl
-   *  hij draaide). Alleen opnieuw aanmaken helpt - zie docs/sysbox/README.md. */
-  needsRecreate?: boolean;
+  /** Sysbox: de uid-shift van deze container ontbreekt (host ging onderuit
+   *  terwijl hij draaide) - zie docs/sysbox/README.md. */
+  needsRepair?: boolean;
 }
 
 type DetailTab = 'firewall' | 'docker' | 'noot' | 'terminal';

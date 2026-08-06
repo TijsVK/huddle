@@ -185,10 +185,10 @@ export interface DevcontainerInfo {
   created: number;
   inNetwork: boolean;
   huddleInNetwork: boolean;
-  /** Alleen in sysbox-modus: de container dateert van vóór de laatste boot van de
-   *  engine host, dus zijn ID-mapped rootfs is weg. Hij start nog wel, maar alle
-   *  image-bestanden staan op nobody:nogroup. Hij moet opnieuw aangemaakt worden. */
-  needsRecreate: boolean;
+  /** Alleen in sysbox-modus: de uid-shift van deze container ontbreekt, dus de
+   *  image staat binnenin op nobody:nogroup. Te repareren met huddle-sysbox-repair
+   *  op de engine host (gebeurt normaal automatisch bij elke boot). */
+  needsRepair: boolean;
 }
 
 // Set van dc-net-* netwerken waar de huddle-container zelf in zit. Wordt
@@ -221,25 +221,36 @@ function hostBootTimeSec(): number | null {
   return hostBootSec;
 }
 
-/** Sysbox shift de rootfs op twee manieren, en kiest zelf welke: een gechownde
- *  kloon onder /var/lib/sysbox (staat op disk, overleeft een reboot) óf een
- *  ID-mapped mount (kernel-mount, weg na een reboot). Wordt de host afgebroken
- *  terwijl zo'n ID-mapped container DRAAIT, dan start hij daarna zonder shift:
- *  de hele image staat binnenin op nobody:nogroup - geen sudo, geen apt, kapotte
- *  setuid-binaries. Stoppen en starten repareert dat NIET, alleen opnieuw
- *  aanmaken. Netjes gestopte containers overleven het wel.
+/** Bij een rootfs op overlayfs ID-mapt sysbox de lower layers en CHOWNT het de
+ *  upper layer (die kan niet ID-mapped worden); die chown wordt teruggedraaid als
+ *  de container stopt. Sneuvelt de host terwijl hij DRAAIT, dan gebeurt dat
+ *  terugdraaien nooit, en bij de volgende start ziet sysbox-runc een rootfs die
+ *  niet van echte root is en besluit `needUidShiftOnRootfs` dat er niets geshift
+ *  hoeft te worden. Resultaat: de image staat binnenin op nobody:nogroup - geen
+ *  sudo, geen apt. Herstarten helpt niet, want de eigenaar op disk stuurt de
+ *  beslissing; huddle-sysbox-repair draait de chown alsnog terug (host-side).
  *
- *  Daarom meten in plaats van gokken: alleen containers van vóór de laatste boot
- *  kunnen dit hebben (goedkope voorfilter), en die krijgen een echte eigendoms-
- *  check. /bin/sh komt uit de image en hoort van uid 0 te zijn; 65534 (nobody)
- *  betekent dat de shift weg is. */
+ *  Meten in plaats van gokken: alleen containers van vóór de laatste boot kunnen
+ *  dit hebben (goedkope voorfilter), en die krijgen een echte eigendomscheck.
+ *  /bin/sh komt uit de image en hoort van uid 0 te zijn; 65534 (nobody) betekent
+ *  dat de shift ontbreekt. */
 function createdBeforeBoot(createdSec: number): boolean {
   if (!SYSBOX_ENABLED) return false;
   const boot = hostBootTimeSec();
   return boot !== null && createdSec < boot;
 }
 
-export async function devcontainerNeedsRecreate(
+/** uid van een image-bestand IN de container; 65534 = de uid-shift ontbreekt. */
+export async function devcontainerRootfsUnshifted(containerRef: string): Promise<boolean> {
+  try {
+    const uid = await execContainerOutput(containerRef, ['stat', '-c', '%u', '/bin/sh']);
+    return uid.trim() === '65534';
+  } catch {
+    return false;
+  }
+}
+
+export async function devcontainerNeedsRepair(
   containerName: string,
   createdSec: number,
   running: boolean
@@ -247,12 +258,7 @@ export async function devcontainerNeedsRecreate(
   // Een gestopte container is nog niets: hij breekt pas (of juist niet) bij de
   // volgende start, en exec kan er sowieso niet in.
   if (!createdBeforeBoot(createdSec) || !running) return false;
-  try {
-    const out = await execContainerOutput(containerName, ['stat', '-c', '%u', '/bin/sh']);
-    return out.trim() === '65534';
-  } catch {
-    return false;
-  }
+  return devcontainerRootfsUnshifted(containerName);
 }
 
 export async function listDevcontainers(): Promise<DevcontainerInfo[]> {
@@ -275,7 +281,7 @@ export async function listDevcontainers(): Promise<DevcontainerInfo[]> {
       created: c.Created,
       inNetwork: Boolean(dcNet?.IPAddress),
       huddleInNetwork: huddleNets.has(netName),
-      needsRecreate: await devcontainerNeedsRecreate(name, c.Created, c.State === 'running'),
+      needsRepair: await devcontainerNeedsRepair(name, c.Created, c.State === 'running'),
     };
   }));
 }
@@ -530,14 +536,19 @@ export async function forceDeleteContainer(containerId: string): Promise<void> {
 export async function startExistingContainer(containerId: string): Promise<void> {
   await dockerRequest('POST', `/containers/${encodeURIComponent(containerId)}/start`, {});
   if (!SYSBOX_ENABLED) return;
-  // Ging de engine host onderuit terwijl deze container draaide, dan start hij
-  // nu zonder uid-shift: image op nobody:nogroup, geen sudo, geen apt. Dat is
-  // pas te zien NA de start, want de shift wordt bij het starten gelegd. De
-  // gebruiker klikt start en hoort gewoon zijn container te krijgen, dus
-  // repareren we het hier - met behoud van alles wat erin stond.
-  const { rootfsIsUnshifted, healUnshiftedDevcontainer } = await import('./sysbox-heal');
-  if (!(await rootfsIsUnshifted(containerId))) return;
-  await healUnshiftedDevcontainer(containerId);
+  // Ging de engine host onderuit terwijl deze container draaide, dan is de chown
+  // op zijn overlayfs-upper-layer nooit teruggedraaid en start hij zonder
+  // uid-shift: image op nobody:nogroup, geen sudo, geen apt. Repareren kan alleen
+  // op de host zelf (het zit in /var/lib/docker, buiten deze container), en dat
+  // doet huddle-sysbox-repair bij elke boot van de engine. Blijkt hier dat het
+  // tóch nog stuk is, dan is dat het waard om te melden in plaats van de
+  // gebruiker een container te geven waarin niets werkt.
+  if (await devcontainerRootfsUnshifted(containerId)) {
+    console.error(
+      `[sysbox] ${containerId}: rootfs is not uid-shifted (image shows as nobody:nogroup). ` +
+      `Run 'sudo huddle-sysbox-repair' on the engine host while this container is stopped.`
+    );
+  }
 }
 
 export async function cleanupContainerNetwork(containerName: string): Promise<void> {

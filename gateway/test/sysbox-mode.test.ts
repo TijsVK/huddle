@@ -45,24 +45,24 @@ describe('sysbox mode flag', () => {
   });
 });
 
-// ── Kapotte uid-shift na een harde reboot ───────────────────────────────────
-// Sysbox shift de rootfs soms met een ID-mapped mount; die is weg na een reboot
-// van de host, en een container die tijdens het afbreken DRAAIDE komt daarna
-// terug met de hele image op nobody (65534). Herstarten repareert dat niet.
-describe('devcontainerNeedsRecreate', () => {
+// ── Onvoltooide uid-shift na een harde reboot ───────────────────────────────
+// Sysbox chownt de overlayfs-upper-layer en draait dat terug bij het stoppen.
+// Sneuvelt de host terwijl de container draait, dan blijft die chown staan en
+// besluit sysbox bij de volgende start dat er niets geshift hoeft te worden.
+describe('devcontainerNeedsRepair', () => {
   it('slaat containers over die het niet kunnen zijn', async () => {
     const m = await loadDocker({ HUDDLE_SYSBOX: '1' });
     // Van ná de laatste boot: die heeft zijn shift nog, niet meten.
     const future = Math.floor(Date.now() / 1000) + 3600;
-    expect(await m.devcontainerNeedsRecreate('x', future, true)).toBe(false);
+    expect(await m.devcontainerNeedsRepair('x', future, true)).toBe(false);
     // Gestopt: breekt pas (of juist niet) bij de volgende start, en exec kan er
     // niet in. Geen exec-poging, dus ook geen false positive als docker weg is.
-    expect(await m.devcontainerNeedsRecreate('x', 1, false)).toBe(false);
+    expect(await m.devcontainerNeedsRepair('x', 1, false)).toBe(false);
   });
 
   it('staat uit in klassieke modus', async () => {
     const m = await loadDocker({ HUDDLE_SYSBOX: undefined });
-    expect(await m.devcontainerNeedsRecreate('x', 1, true)).toBe(false);
+    expect(await m.devcontainerNeedsRepair('x', 1, true)).toBe(false);
   });
 });
 

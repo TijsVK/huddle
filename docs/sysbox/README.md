@@ -74,38 +74,42 @@ JetBrains Gateway: add a Docker server on the WSL distro. Untested.
 
 ## Operational notes
 
-- **Stop devcontainers before the engine goes down — use `.\huddle-engine.ps1 -Down`.**
-  Sysbox shifts a container's rootfs either by chowning a clone under `/var/lib/sysbox` (on disk,
-  survives a reboot) or with an ID-mapped mount (a kernel mount, gone after one) — and it picks per
-  container. Kill the host while an ID-mapped container is *running* and it comes back with the
-  whole image owned by `nobody:nogroup`: no `sudo`, no `apt`, broken setuid binaries. `sysbox-mgr`
-  says so itself on the way out — *"The following containers are active and will stop operating
-  properly"*. A stop/start does **not** repair it; only recreating the container does. A container
-  that was stopped first always comes back fine. Measured: `wsl --terminate` does not run systemd
-  shutdown, so no unit inside the distro can save you — the stop has to happen from Windows first.
-  Native Linux is mostly safe here, since a normal reboot stops docker cleanly.
-- **You should never have to deal with this.** Starting a devcontainer probes `/bin/sh`'s owner;
-  if the shift is gone, the gateway recreates the container and puts the data back before handing
-  it over (`gateway/src/sysbox-heal.ts`). Press start, get your container, with everything you
-  installed and wrote still in it.
-  How, and why the obvious routes do not work: the *image* layers are broken in the affected
-  container but correct in a fresh one, while the *writable* layer is still readable with correct
-  uids **inside** the broken container. So: fresh container from the original image, then copy the
-  writable layer across inside-to-inside so each container applies its own shift. `docker commit`
-  is the wrong tool — it bakes one container's shifted uids into the image and the next container
-  has a different subuid base, so everything lands on `nobody` again (measured). The copy takes the
-  changed paths from `docker diff`, minus anything at, under, **or above** a mount point: the
-  workspace bind, the inner daemon's `/var/lib/docker` volume and sysbox's read-only
-  `/lib/modules` are not writable-layer state, and an *ancestor* of a mount would make `tar`
-  recurse into it (143 MB of kernel modules instead of 900 KB).
-  Manual rescue, if you ever want it: `docker cp <name>:/home/vscode/.claude ./rescue/` — that
-  works too, and the files are also readable host-side under `/proc/<pid>/root/`.
-- Upstream considers surviving a reboot to be intended: on nestybox/sysbox#757, the same "mount
-  lost its `idmapped` attribute" symptom got *"this should definitely work, there must be a bug
-  somewhere"*. So the heal above is a workaround for an upstream bug, not a permanent design.
-  Sysbox's own troubleshooting guide meanwhile states that after sysbox-fs/sysbox-mgr restarts you
-  are "expected to recreate ... all the active Sysbox containers" — which is exactly why the
-  `-Down` rule above matters.
+- **An unclean host shutdown leaves a devcontainer's uid-shift half-applied. The engine repairs it
+  at boot; you should never notice.** Worth understanding, because the symptom is alarming:
+  the whole image shows as `nobody:nogroup` inside, `sudo` refuses to run and `apt` cannot write.
+
+  Root cause. For a rootfs on overlayfs, sysbox ID-maps the lower layers and **chowns the upper
+  (writable) layer**, because an overlayfs upper layer cannot be ID-mapped — and it reverts that
+  chown when the container stops (sysbox-mgr `update()`: *"sysbox-runc will chown the upper layer
+  ... Track this fact so we can revert that chown when the container is stopped or paused."*). If
+  the host dies while the container runs, that revert never happens. At the next start,
+  sysbox-runc's `needUidShiftOnRootfs()` stats the rootfs and decides from its owner alone:
+
+  ```go
+  if rootfsUid == 0 && rootfsGid == 0 && hostUidMap != rootfsUid ... { return true }
+  return false
+  ```
+
+  The rootfs is still owned by the container's subuid base, so it concludes no shifting is needed
+  and starts with the lower layers unshifted. Restarting cannot help — the on-disk owner is what
+  drives the decision — which is why sysbox's own advice to "recreate (stop and start)" does not
+  cure this one.
+
+  The fix is to finish the interrupted revert: `scripts/huddle-sysbox-repair.sh` subtracts the
+  subuid base from the upper layer, so the rootfs is owned by true root again and sysbox shifts it
+  normally on the next start. The container keeps its identity **and all of its data** — nothing is
+  recreated and nothing is copied. It runs from a systemd unit after `docker.service` on every
+  engine boot, because `wsl --terminate` runs no systemd shutdown (measured), so the repair cannot
+  happen on the way down. Only *stopped* containers are touched: a running sysbox container is
+  supposed to have a chowned upper layer.
+
+  Run it by hand any time with `sudo huddle-sysbox-repair` on the engine; the portal shows
+  **Repair needed** if a container is still affected.
+- **`.\huddle-engine.ps1 -Down` before rebooting Windows** stops devcontainers first and avoids the
+  above entirely. Native Linux is largely safe already: a normal reboot stops docker cleanly.
+- Upstream considers surviving a reboot to be intended — nestybox/sysbox#757, same "mount lost its
+  `idmapped` attribute" symptom: *"this should definitely work, there must be a bug somewhere."*
+  Worth reporting this variant with the `needUidShiftOnRootfs` analysis above.
 - **WSL tears the distro down** when no client is attached, taking dockerd and the containers with
   it. `-Keepalive` holds one client open. The gateway carries `--restart unless-stopped`;
   devcontainers deliberately do not, since a restart policy would silently bring them back in the

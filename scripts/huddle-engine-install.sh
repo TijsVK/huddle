@@ -229,6 +229,40 @@ else
   fi
 fi
 
+# -- 4b. boot-time uid-shift repair -------------------------------------------
+# A Sysbox container that was RUNNING when the host went down keeps the chown on
+# its overlayfs upper layer (normally reverted on stop), and then starts unshifted
+# - the whole image as nobody:nogroup, no sudo, no apt. See the header of
+# huddle-sysbox-repair.sh. WSL runs no systemd shutdown on `wsl --terminate`, so
+# the repair cannot happen on the way down; it runs on the way up instead.
+if [ $CHECK_ONLY -eq 0 ]; then
+  info "installing the boot-time uid-shift repair"
+  repair_src="$(dirname "$0")/huddle-sysbox-repair.sh"
+  if [ -f "$repair_src" ]; then
+    install -m 0755 "$repair_src" /usr/local/bin/huddle-sysbox-repair
+    cat > /etc/systemd/system/huddle-sysbox-repair.service <<'UNIT'
+[Unit]
+Description=Repair Sysbox containers whose uid-shift was interrupted by an unclean shutdown
+After=docker.service sysbox.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/huddle-sysbox-repair
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    systemctl enable huddle-sysbox-repair.service >/dev/null 2>&1
+    ok "huddle-sysbox-repair runs at every engine boot"
+  else
+    no "huddle-sysbox-repair.sh not found next to this script - skipping"
+    VERIFIED=0
+  fi
+fi
+
 # -- 5. smoke test ------------------------------------------------------------
 if [ $CHECK_ONLY -eq 0 ]; then
   info "smoke test: unprivileged container under sysbox-runc"

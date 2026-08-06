@@ -26,7 +26,7 @@ import {
   type StartParams,
   type IdeName,
   SYSBOX_ENABLED,
-  devcontainerNeedsRecreate,
+  devcontainerNeedsRepair,
 } from './docker';
 import {
   getOperatorToken,
@@ -478,8 +478,8 @@ export async function createApiServer(): Promise<FastifyInstance> {
       // inspect.Created is een ISO-string; devcontainerNeedsRecreate rekent in
       // unix-seconden, net als het Created-veld uit /containers/json.
       const createdSec = Math.floor(Date.parse(inspect?.Created ?? '') / 1000);
-      const needsRecreate = Number.isFinite(createdSec)
-        ? await devcontainerNeedsRecreate(req.params.name, createdSec, inspect?.State?.Running === true)
+      const needsRepair = Number.isFinite(createdSec)
+        ? await devcontainerNeedsRepair(req.params.name, createdSec, inspect?.State?.Running === true)
         : false;
       return {
         inspect,
@@ -487,7 +487,7 @@ export async function createApiServer(): Promise<FastifyInstance> {
         globalRules,
         huddleInNetwork,
         airlocked: getAirlocked(req.params.name),
-        needsRecreate,
+        needsRepair,
       };
     } catch (err: any) {
       return reply.code(404).send({ error: err.message });

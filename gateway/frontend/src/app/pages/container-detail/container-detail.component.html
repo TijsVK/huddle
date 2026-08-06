@@ -42,8 +42,8 @@
         @if (d.airlocked) {
           <span class="cd-badge cd-badge--lock"><app-icon name="shield-check" [size]="11" /> Airlock</span>
         }
-        @if (d.needsRecreate) {
-          <span class="cd-badge cd-badge--warn" title="This container predates the last engine restart. Its files show as nobody:nogroup inside — sudo and apt will fail. Recreating it is the only fix.">Recreate needed</span>
+        @if (d.needsRepair) {
+          <span class="cd-badge cd-badge--warn" title="The engine host went down while this container was running, so its uid-shift was left incomplete: the image shows as nobody:nogroup inside and sudo and apt will fail. Stop it and run 'sudo huddle-sysbox-repair' on the engine host; your data is not affected.">Repair needed</span>
         }
       </div>
     </div>

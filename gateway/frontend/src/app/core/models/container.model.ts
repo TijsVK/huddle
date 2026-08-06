@@ -13,10 +13,10 @@ export interface Container {
   presentableName?: string;
   inNetwork?: boolean;
   huddleInNetwork?: boolean;
-  /** Sysbox-modus: container van vóór de laatste boot van de engine host. Zijn
-   *  uid-shift is weg, dus de image staat binnenin op nobody:nogroup (geen sudo,
-   *  geen apt). Alleen opnieuw aanmaken lost het op; herstarten niet. */
-  needsRecreate?: boolean;
+  /** Sysbox-modus: de uid-shift ontbreekt, dus de image staat binnenin op
+   *  nobody:nogroup (geen sudo, geen apt). Herstarten helpt niet; de engine host
+   *  repareert dit met huddle-sysbox-repair (normaal automatisch bij elke boot). */
+  needsRepair?: boolean;
   ipAddress?: string;
   securityScore?: number;
   labels?: Record<string, string>;
