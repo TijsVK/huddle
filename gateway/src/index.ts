@@ -1,7 +1,7 @@
 import { initDb } from './db';
 import { createProxyServer } from './proxy';
 import { createApiServer } from './api';
-import { listDevcontainers, networkExists, connectNetwork, refreshContainerIptables, SYSBOX_ENABLED} from './docker';
+import { listDevcontainers, networkExists, connectNetwork, refreshContainerIptables, SYSBOX_ENABLED } from './docker';
 import { createContainerProxy } from './socket-proxy';
 import { initCa } from './tls-ca';
 import { sanitizeResolvConf, scheduleSettlingSanitize } from './dns-egress';
