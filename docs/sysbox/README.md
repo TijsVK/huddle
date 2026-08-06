@@ -74,9 +74,26 @@ JetBrains Gateway: add a Docker server on the WSL distro. Untested.
 
 ## Operational notes
 
+- **Stop devcontainers before the engine goes down — use `.\huddle-engine.ps1 -Down`.**
+  Sysbox shifts a container's rootfs either by chowning a clone under `/var/lib/sysbox` (on disk,
+  survives a reboot) or with an ID-mapped mount (a kernel mount, gone after one) — and it picks per
+  container. Kill the host while an ID-mapped container is *running* and it comes back with the
+  whole image owned by `nobody:nogroup`: no `sudo`, no `apt`, broken setuid binaries. `sysbox-mgr`
+  says so itself on the way out — *"The following containers are active and will stop operating
+  properly"*. A stop/start does **not** repair it; only recreating the container does. A container
+  that was stopped first always comes back fine. Measured: `wsl --terminate` does not run systemd
+  shutdown, so no unit inside the distro can save you — the stop has to happen from Windows first.
+  Native Linux is mostly safe here, since a normal reboot stops docker cleanly.
+- **The data is never lost, even when a container is broken this way.** The filesystem is intact;
+  only the ownership *mapping* is missing. Rescue it from the engine before recreating:
+  `wsl -d huddle-engine -- docker cp <name>:/home/vscode/.claude ./rescue/`. Do not use
+  `docker commit` for this — the commit bakes in the shifted uids and the new container shows
+  `nobody` again. The portal flags an affected container as **Recreate needed** (it probes the real
+  ownership rather than guessing from age).
 - **WSL tears the distro down** when no client is attached, taking dockerd and the containers with
-  it. `-Keepalive` holds one client open. Gateway and devcontainers carry `--restart unless-stopped`
-  so they return with dockerd either way.
+  it. `-Keepalive` holds one client open. The gateway carries `--restart unless-stopped`;
+  devcontainers deliberately do not, since a restart policy would silently bring them back in the
+  broken state described above.
 - **Keep other Docker CLIs off the engine's PATH.** Rancher Desktop's WSL integration puts its
   `docker` and a `docker-credential-secretservice` there; the latter cannot load `libsecret` in a
   headless distro and makes **every image pull and build** fail with

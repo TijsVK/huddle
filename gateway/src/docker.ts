@@ -185,6 +185,10 @@ export interface DevcontainerInfo {
   created: number;
   inNetwork: boolean;
   huddleInNetwork: boolean;
+  /** Alleen in sysbox-modus: de container dateert van vóór de laatste boot van de
+   *  engine host, dus zijn ID-mapped rootfs is weg. Hij start nog wel, maar alle
+   *  image-bestanden staan op nobody:nogroup. Hij moet opnieuw aangemaakt worden. */
+  needsRecreate: boolean;
 }
 
 // Set van dc-net-* netwerken waar de huddle-container zelf in zit. Wordt
@@ -201,13 +205,63 @@ export async function getHuddleNetworks(): Promise<Set<string>> {
   }
 }
 
+// Boot-tijd van de ENGINE HOST in unix-seconden. /proc/stat btime is niet
+// gevirtualiseerd voor deze container (de gateway draait onder de gewone runtime),
+// dus dit is de boot van de host zelf. Eén keer lezen volstaat: gaat de host
+// herstarten, dan herstart deze gateway mee.
+let hostBootSec: number | null = null;
+function hostBootTimeSec(): number | null {
+  if (hostBootSec !== null) return hostBootSec;
+  try {
+    const m = /^btime\s+(\d+)$/m.exec(fs.readFileSync('/proc/stat', 'utf8'));
+    hostBootSec = m ? Number(m[1]) : null;
+  } catch {
+    hostBootSec = null;
+  }
+  return hostBootSec;
+}
+
+/** Sysbox shift de rootfs op twee manieren, en kiest zelf welke: een gechownde
+ *  kloon onder /var/lib/sysbox (staat op disk, overleeft een reboot) óf een
+ *  ID-mapped mount (kernel-mount, weg na een reboot). Wordt de host afgebroken
+ *  terwijl zo'n ID-mapped container DRAAIT, dan start hij daarna zonder shift:
+ *  de hele image staat binnenin op nobody:nogroup - geen sudo, geen apt, kapotte
+ *  setuid-binaries. Stoppen en starten repareert dat NIET, alleen opnieuw
+ *  aanmaken. Netjes gestopte containers overleven het wel.
+ *
+ *  Daarom meten in plaats van gokken: alleen containers van vóór de laatste boot
+ *  kunnen dit hebben (goedkope voorfilter), en die krijgen een echte eigendoms-
+ *  check. /bin/sh komt uit de image en hoort van uid 0 te zijn; 65534 (nobody)
+ *  betekent dat de shift weg is. */
+function createdBeforeBoot(createdSec: number): boolean {
+  if (!SYSBOX_ENABLED) return false;
+  const boot = hostBootTimeSec();
+  return boot !== null && createdSec < boot;
+}
+
+export async function devcontainerNeedsRecreate(
+  containerName: string,
+  createdSec: number,
+  running: boolean
+): Promise<boolean> {
+  // Een gestopte container is nog niets: hij breekt pas (of juist niet) bij de
+  // volgende start, en exec kan er sowieso niet in.
+  if (!createdBeforeBoot(createdSec) || !running) return false;
+  try {
+    const out = await execContainerOutput(containerName, ['stat', '-c', '%u', '/bin/sh']);
+    return out.trim() === '65534';
+  } catch {
+    return false;
+  }
+}
+
 export async function listDevcontainers(): Promise<DevcontainerInfo[]> {
   const filters = JSON.stringify({ label: ['com.intellij.devcontainer.id'] });
   const [containers, huddleNets] = await Promise.all([
     dockerRequest('GET', `/containers/json?all=1&filters=${encodeURIComponent(filters)}`) as Promise<any[]>,
     getHuddleNetworks(),
   ]);
-  return containers.map((c) => {
+  return await Promise.all(containers.map(async (c) => {
     const name = ((c.Names?.[0] as string) ?? '').replace(/^\//, '');
     const netName = `dc-net-${name}`;
     const dcNet = c.NetworkSettings?.Networks?.[netName] ?? c.NetworkSettings?.Networks?.['devcontainer-net'];
@@ -221,8 +275,9 @@ export async function listDevcontainers(): Promise<DevcontainerInfo[]> {
       created: c.Created,
       inNetwork: Boolean(dcNet?.IPAddress),
       huddleInNetwork: huddleNets.has(netName),
+      needsRecreate: await devcontainerNeedsRecreate(name, c.Created, c.State === 'running'),
     };
-  });
+  }));
 }
 
 export async function refreshContainerIptables(containerId: string, containerName: string): Promise<void> {
@@ -1034,10 +1089,15 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
       ...(SYSBOX_ENABLED
         ? {
             Runtime: SYSBOX_RUNTIME,
-            // De engine host is op Windows/macOS een VM/distro die afgebroken kan
-            // worden; zonder policy staat de devcontainer daarna stil terwijl
-            // dockerd wel terugkomt.
-            RestartPolicy: { Name: 'unless-stopped' },
+            // BEWUST GEEN RestartPolicy. Sysbox legt de ID-mapped mount op de
+            // rootfs aan bij CREATE; een reboot van de host (op Windows sloopt WSL
+            // de distro routineus) gooit die mount weg en hij komt nooit terug.
+            // De container start daarna gewoon op - sysbox-mgr laat dat toe, zie
+            // --fsuid-map-fail-on-error - maar alle image-bestanden staan dan op
+            // nobody:nogroup: geen sudo, geen apt, kapotte setuid-binaries. Een
+            // restart-policy maakt dat automatisch en onzichtbaar; zonder policy
+            // blijft de container staan en kan hij herkend + opnieuw aangemaakt
+            // worden (zie devcontainerNeedsRecreate).
           }
         : {}),
       ...(RUNTIME_SECURITY_OPT.length ? { SecurityOpt: RUNTIME_SECURITY_OPT } : {}),

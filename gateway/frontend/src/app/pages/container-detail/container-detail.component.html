@@ -42,6 +42,9 @@
         @if (d.airlocked) {
           <span class="cd-badge cd-badge--lock"><app-icon name="shield-check" [size]="11" /> Airlock</span>
         }
+        @if (d.needsRecreate) {
+          <span class="cd-badge cd-badge--warn" title="This container predates the last engine restart. Its files show as nobody:nogroup inside — sudo and apt will fail. Recreating it is the only fix.">Recreate needed</span>
+        }
       </div>
     </div>
     <div class="cd-head__actions">

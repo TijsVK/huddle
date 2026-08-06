@@ -26,6 +26,7 @@ import {
   type StartParams,
   type IdeName,
   SYSBOX_ENABLED,
+  devcontainerNeedsRecreate,
 } from './docker';
 import {
   getOperatorToken,
@@ -474,7 +475,20 @@ export async function createApiServer(): Promise<FastifyInstance> {
         getHuddleNetworks(),
       ]);
       const huddleInNetwork = huddleNets.has(`dc-net-${req.params.name}`);
-      return { inspect, rules, globalRules, huddleInNetwork, airlocked: getAirlocked(req.params.name) };
+      // inspect.Created is een ISO-string; devcontainerNeedsRecreate rekent in
+      // unix-seconden, net als het Created-veld uit /containers/json.
+      const createdSec = Math.floor(Date.parse(inspect?.Created ?? '') / 1000);
+      const needsRecreate = Number.isFinite(createdSec)
+        ? await devcontainerNeedsRecreate(req.params.name, createdSec, inspect?.State?.Running === true)
+        : false;
+      return {
+        inspect,
+        rules,
+        globalRules,
+        huddleInNetwork,
+        airlocked: getAirlocked(req.params.name),
+        needsRecreate,
+      };
     } catch (err: any) {
       return reply.code(404).send({ error: err.message });
     }

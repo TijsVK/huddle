@@ -11,6 +11,8 @@
 #     .\huddle-engine.ps1 -Setup     # create + provision the distro
 #     .\huddle-engine.ps1 -Check     # verify an existing engine
 #     .\huddle-engine.ps1 -Shell     # open a shell in the engine
+#     .\huddle-engine.ps1 -Down      # stop devcontainers, then the distro (do
+#                                    #   this before rebooting Windows)
 # ------------------------------------------------------------------------------
 param(
     [switch]$Setup,
@@ -20,6 +22,7 @@ param(
     [switch]$Code,
     [switch]$Attach,
     [switch]$Up,
+    [switch]$Down,
     [switch]$Keepalive,
     [switch]$VsCode,
     [switch]$Apply,
@@ -116,7 +119,12 @@ function Set-EngineWslConf {
     # every devcontainer.
     # PRESERVE appendWindowsPath: an earlier version forced it back to 'true', so
     # every -Setup silently undid -IsolatePath and let Rancher's docker back onto
-    # the engine's PATH.
+    # the engine's PATH. A FRESH distro has no value to preserve and must default
+    # to 'false' for the same reason: with the Windows PATH injected, docker picks
+    # up Rancher's docker-credential-secretservice and every pull dies with
+    # "exit status 127". Interop itself stays on (enabled=true) - Windows binaries
+    # remain callable by absolute path, and `code` is launched from the Windows
+    # side anyway.
     $okSystemd = (Invoke-Engine -Quiet -Command 'grep -q "^systemd=true" /etc/wsl.conf 2>/dev/null') -eq 0
     $hasPathLine = (Invoke-Engine -Quiet -Command 'grep -q "^appendWindowsPath=" /etc/wsl.conf 2>/dev/null') -eq 0
     if ($okSystemd -and $hasPathLine) {
@@ -130,12 +138,13 @@ function Set-EngineWslConf {
     # wsl.conf wholesale would silently put every session back to root.
     # Single-quoted PowerShell string: the payload is bash and must not be touched.
     $cmd = 'u=$(sed -n "s/^default=//p" /etc/wsl.conf 2>/dev/null | head -1); ' +
-           'awp=$(sed -n "s/^appendWindowsPath=//p" /etc/wsl.conf 2>/dev/null | head -1); [ -n "$awp" ] || awp=true; ' +
+           'awp=$(sed -n "s/^appendWindowsPath=//p" /etc/wsl.conf 2>/dev/null | head -1); [ -n "$awp" ] || awp=false; ' +
            'printf "%s\n" "[boot]" "systemd=true" "" "[interop]" "enabled=true" "appendWindowsPath=$awp" > /etc/wsl.conf; ' +
            'if [ -n "$u" ]; then printf "%s\n" "" "[user]" "default=$u" >> /etc/wsl.conf; ' +
            'printf "%s\n" "" "[automount]" "enabled=true" "options=metadata,uid=$(id -u $u),gid=$(id -g $u),umask=022" >> /etc/wsl.conf; fi; ' +
            'sed -i "s/\r$//" /etc/wsl.conf; true'
     if ((Invoke-Engine -Command $cmd) -ne 0) { Write-Bad "could not write /etc/wsl.conf"; return $false }
+    Stop-EngineDevcontainers
     & wsl.exe --terminate $ENGINE_DISTRO | Out-Null
     Write-Ok "wsl.conf written (distro restarted so it takes effect)"
     return $true
@@ -191,6 +200,22 @@ function Initialize-HuddleEngine {
 #
 # A hidden, long-lived client keeps the distro alive. It is idempotent and costs
 # one sleeping process.
+
+# Sysbox hangt de uid-shift van een container op aan sysbox-mgr. Gaat de host
+# onderuit terwijl een container DRAAIT, dan is die container daarna definitief
+# stuk: alle image-bestanden staan op nobody:nogroup (geen sudo, geen apt) en een
+# herstart repareert dat niet - alleen opnieuw aanmaken. sysbox-mgr waarschuwt er
+# zelf voor: "The following containers are active and will stop operating
+# properly". Een container die NETJES gestopt was, overleeft de reboot wel.
+# WSL draait geen systemd-shutdown bij --terminate (gemeten), dus een unit in de
+# distro helpt niet; het moet hier gebeuren, vóór wij de distro neerhalen.
+function Stop-EngineDevcontainers {
+    if (-not (Test-HuddleEngine)) { return }
+    $rc = Invoke-Engine -Quiet -Command 'docker ps -q --filter label=com.intellij.devcontainer.id | grep -q .'
+    if ($rc -ne 0) { return }
+    Write-Step "stopping devcontainers first (a sysbox container killed while running cannot be repaired)"
+    Invoke-Engine -Quiet -Command 'docker stop -t 20 $(docker ps -q --filter label=com.intellij.devcontainer.id) >/dev/null 2>&1; true' | Out-Null
+}
 
 function Test-EngineKeepalive {
     return ((Invoke-Engine -Quiet -Command 'pgrep -f huddle-engine-keepalive >/dev/null 2>&1') -eq 0)
@@ -525,6 +550,7 @@ function Disable-EngineWindowsPath {
            'printf "%s\n" "" "[automount]" "enabled=true" "options=metadata,uid=$(id -u $u),gid=$(id -g $u),umask=022" >> /etc/wsl.conf; fi; ' +
            'sed -i "s/\r$//" /etc/wsl.conf; true'
     if ((Invoke-Engine -Command $cmd) -ne 0) { Write-Bad "could not write /etc/wsl.conf"; return $false }
+    Stop-EngineDevcontainers
     & wsl.exe --terminate $ENGINE_DISTRO | Out-Null
     Write-Ok "done - restart the stack with: .\huddle-engine.ps1 -Up"
     Write-Host "  Verify afterwards:  wsl -d $ENGINE_DISTRO -- which -a docker   (only /usr/bin/docker)" -ForegroundColor DarkGray
@@ -611,7 +637,7 @@ function Show-AttachHelp {
 
 # Standalone entry points. Strict mode only applies when this script is RUN,
 # not when huddle.ps1 dot-sources it.
-if ($Setup -or $Check -or $Shell -or $Diagnose -or $Code -or $Attach -or $Up -or $Keepalive -or $VsCode -or $IsolatePath) { $ErrorActionPreference = 'Stop' }
+if ($Setup -or $Check -or $Shell -or $Diagnose -or $Code -or $Attach -or $Up -or $Down -or $Keepalive -or $VsCode -or $IsolatePath) { $ErrorActionPreference = 'Stop' }
 if ($Setup) { if (Initialize-HuddleEngine -RepoRoot $PSScriptRoot) { exit 0 } else { exit 1 } }
 if ($Check) { if (Test-EngineReady) { exit 0 } else { exit 1 } }
 if ($Shell) { & wsl.exe -d $ENGINE_DISTRO --cd ~; exit $LASTEXITCODE }
@@ -621,6 +647,16 @@ if ($Attach)   { Show-AttachHelp; exit 0 }
 if ($VsCode)   { if (Set-VsCodeDockerShim -Apply:$Apply) { exit 0 } else { exit 1 } }
 if ($IsolatePath) { if (Disable-EngineWindowsPath) { exit 0 } else { exit 1 } }
 if ($Up)       { if (Start-EngineStack) { exit 0 } else { exit 1 } }
+if ($Down) {
+    # THE safe way to put the engine away: stop the devcontainers before the
+    # distro goes down, so they still work tomorrow. Pulling the distro out from
+    # under a running sysbox container breaks it permanently.
+    Stop-EngineDevcontainers
+    Stop-EngineKeepalive
+    & wsl.exe --terminate $ENGINE_DISTRO | Out-Null
+    Write-Ok "engine '$ENGINE_DISTRO' stopped cleanly - devcontainers will start again with -Up"
+    exit 0
+}
 if ($Keepalive) {
     if (Start-EngineKeepalive -Verbose2) {
         Invoke-Engine -Command 'pgrep -af huddle-engine-keepalive' | Out-Null

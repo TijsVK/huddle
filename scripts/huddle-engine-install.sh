@@ -16,6 +16,9 @@ set -uo pipefail
 SYSBOX_VERSION="${SYSBOX_VERSION:-0.7.1}"
 CHECK_ONLY=0
 [ "${1:-}" = "--check" ] && CHECK_ONLY=1
+# Set to 0 by any check that proves the engine is NOT usable. The script used to
+# end with "engine host ready" no matter what came before it.
+VERIFIED=1
 
 ok(){ printf '  \033[32m[ok]\033[0m %s\n' "$*"; }
 no(){ printf '  \033[31m[--]\033[0m %s\n' "$*"; }
@@ -152,7 +155,10 @@ if id "$HUDDLE_ENGINE_USER" >/dev/null 2>&1 && [ $CHECK_ONLY -eq 0 ]; then
     else
       printf '%s\n' '' '[user]' "default=$HUDDLE_ENGINE_USER" >> /etc/wsl.conf
     fi
-    ok "default WSL user set to '$HUDDLE_ENGINE_USER' (takes effect after: wsl --terminate $(hostname 2>/dev/null || echo huddle-engine))"
+    # NB: the distro name, not $(hostname) - inside WSL that is the WINDOWS
+    # machine name, so the hint used to print a --terminate for a distro that
+    # does not exist.
+    ok "default WSL user set to '$HUDDLE_ENGINE_USER' (takes effect after: wsl --terminate ${HUDDLE_ENGINE_DISTRO:-huddle-engine})"
   fi
 fi
 
@@ -178,11 +184,13 @@ else
   alt="https://github.com/nestybox/sysbox/releases/download/v${SYSBOX_VERSION}/sysbox-ce_${SYSBOX_VERSION}.linux_${arch}.deb"
   curl -fsSL -o "$tmp/sysbox.deb" "$alt" || curl -fsSL -o "$tmp/sysbox.deb" "$url" \
     || fatal "could not download sysbox-ce ${SYSBOX_VERSION} for ${arch}"
-  # fuse3 explicitly: sysbox-fs mounts through fusermount3, and the package
-  # dependency only names 'fuse' (FUSE 2) on some distros. A missing or blocked
-  # fusermount3 shows up as "failed to pre-register with sysbox-fs".
-  apt-get install -y --no-install-recommends jq fuse3 fuse rsync iptables lsb-release >/dev/null 2>&1 || \
-    apt-get install -y --no-install-recommends jq fuse rsync iptables lsb-release >/dev/null 2>&1 || true
+  # fuse3 and ONLY fuse3: sysbox-fs mounts through fusermount3. On Ubuntu 24.04
+  # the FUSE-2 'fuse' package conflicts with 'fuse3', so asking for both fails
+  # and any fallback that installs plain 'fuse' REMOVES fusermount3 - leaving an
+  # engine that provisions "successfully" and then fails every container with
+  # "failed to pre-register with sysbox-fs".
+  apt-get install -y --no-install-recommends jq fuse3 rsync iptables lsb-release >/dev/null 2>&1 || \
+    no "could not install jq/fuse3/rsync/iptables - sysbox may fail to start containers"
   DEBIAN_FRONTEND=noninteractive apt-get install -y "$tmp/sysbox.deb" || fatal "sysbox install failed"
   ok "sysbox installed"
 fi
@@ -228,7 +236,15 @@ if [ $CHECK_ONLY -eq 0 ]; then
   for _i in $(seq 1 15); do systemctl is-active --quiet sysbox && break; sleep 2; done
   if ! docker image inspect alpine >/dev/null 2>&1; then
     info "  pulling alpine for the smoke test"
-    docker pull -q alpine >/dev/null 2>&1 || no "  could not pull alpine (network/proxy?)"
+    # Show the pull error instead of swallowing it: the usual cause is a docker
+    # credential helper inherited from the Windows PATH (Rancher/Docker Desktop),
+    # which fails with "exit status 127" and has nothing to do with the network.
+    pull_err=$(docker pull -q alpine 2>&1) || {
+      no "  could not pull alpine: $pull_err"
+      case "$PATH" in
+        */mnt/c/*) no "  the Windows PATH is injected into this distro; set appendWindowsPath=false in /etc/wsl.conf (or run huddle-engine.ps1 -IsolatePath) and retry" ;;
+      esac
+    }
   fi
   if docker image inspect alpine >/dev/null 2>&1; then
     smoke=$(docker run --rm --runtime=sysbox-runc alpine sh -c 'head -1 /proc/self/uid_map' 2>&1)
@@ -239,9 +255,14 @@ if [ $CHECK_ONLY -eq 0 ]; then
       no "sysbox smoke test failed. Output was:"
       printf '      %s\n' "$smoke"
       no "check: systemctl status sysbox sysbox-mgr sysbox-fs"
+      VERIFIED=0
     fi
   else
-    no "smoke test skipped (no alpine image)"
+    # The smoke test is the ONLY proof that sysbox actually works here; skipping
+    # it silently is how an engine gets declared ready and then fails on the
+    # first devcontainer.
+    no "smoke test could NOT run (no alpine image) - sysbox is unverified"
+    VERIFIED=0
   fi
   fi
 
@@ -264,10 +285,17 @@ if command -v fusermount3 >/dev/null 2>&1; then
   ok "fusermount3 present ($(command -v fusermount3))"
 else
   no "fusermount3 MISSING - install fuse3; sysbox-fs cannot mount without it"
+  VERIFIED=0
 fi
 if command -v aa-enabled >/dev/null 2>&1 && aa-enabled >/dev/null 2>&1; then
   info "AppArmor is enabled; if containers fail to pre-register with sysbox-fs, check"
   info "  journalctl -u sysbox-fs -n 50   (look for: fusermount3: mount failed: Permission denied)"
 fi
 
-info "engine host ready - start Huddle with HUDDLE_SYSBOX=1"
+if [ "$VERIFIED" -eq 1 ]; then
+  info "engine host ready - start Huddle with HUDDLE_SYSBOX=1"
+else
+  no "engine provisioned but NOT verified (see the [--] lines above)"
+  no "do not expect devcontainers to start until those are resolved"
+  exit 1
+fi

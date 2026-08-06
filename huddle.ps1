@@ -10,9 +10,20 @@ $HUDDLE_PORT      = if ($env:HUDDLE_PORT) { [int]$env:HUDDLE_PORT } else { 3000 
 # erin - geen socket-proxy, geen per-actie docker-rechten. Sysbox hoort op de
 # docker-HOST, en dat kan op Windows niet de Docker Desktop-VM zijn, dus Huddle
 # krijgt een eigen WSL2-distro als engine host (zie huddle-engine.ps1).
-$SYSBOX_MODE = ($env:HUDDLE_SYSBOX -eq '1')
 $engineHelper = Join-Path $PSScriptRoot 'huddle-engine.ps1'
 if (Test-Path $engineHelper) { . $engineHelper }
+
+# De modus wordt AFGELEID, niet alleen uit de omgeving gelezen: $env:HUDDLE_SYSBOX
+# leeft maar in één proces, dus een volgende start viel terug op klassiek terwijl
+# de gateway op de engine draaide - status meldde dan "gestopt" en de opstartflow
+# initialiseerde er een klassieke naast (WSL2-distro's delen één netns, dus die
+# vechten om dezelfde poort). Bestaat de engine-distro, dan is dit een sysbox-
+# installatie. HUDDLE_SYSBOX=0 blijft de expliciete ontsnapping.
+$SYSBOX_MODE = if ($env:HUDDLE_SYSBOX -eq '1') { $true }
+               elseif ($env:HUDDLE_SYSBOX -eq '0') { $false }
+               elseif (Get-Command Test-HuddleEngine -ErrorAction SilentlyContinue) { [bool](Test-HuddleEngine) }
+               else { $false }
+if ($SYSBOX_MODE) { $env:HUDDLE_SYSBOX = '1' }
 
 # Per-IDE base images. Elke IDE heeft een eigen base-devimage-<ide>/ folder met
 # een Dockerfile en draagt LABEL com.devcontainer.ide=<ide>. Snapshots inheriten
@@ -73,6 +84,13 @@ function Resolve-Runtime {
     $engine = Get-TrueEngine 'docker'
     if (-not $engine) { $engine = Get-TrueEngine 'podman' }
     if ($engine) { return $engine }
+    # In sysbox-modus draait docker op de ENGINE HOST, niet hier. Een machine met
+    # alleen WSL2 en geen Docker Desktop is dan volkomen legitiem - afsluiten zou
+    # precies de opzet blokkeren waar deze modus voor bedoeld is.
+    if ($SYSBOX_MODE) {
+        Write-Host "  [i] Geen lokale container runtime; sysbox-modus gebruikt de engine host." -ForegroundColor DarkGray
+        return 'docker'
+    }
     Write-Host "  [FAIL] Geen werkende container runtime gevonden. Installeer en start Docker of Podman," -ForegroundColor Red
     Write-Host "         of kies er expliciet een met de env-var HUDDLE_RUNTIME=<docker|podman>." -ForegroundColor Red
     exit 1
