@@ -529,6 +529,15 @@ export async function forceDeleteContainer(containerId: string): Promise<void> {
 
 export async function startExistingContainer(containerId: string): Promise<void> {
   await dockerRequest('POST', `/containers/${encodeURIComponent(containerId)}/start`, {});
+  if (!SYSBOX_ENABLED) return;
+  // Ging de engine host onderuit terwijl deze container draaide, dan start hij
+  // nu zonder uid-shift: image op nobody:nogroup, geen sudo, geen apt. Dat is
+  // pas te zien NA de start, want de shift wordt bij het starten gelegd. De
+  // gebruiker klikt start en hoort gewoon zijn container te krijgen, dus
+  // repareren we het hier - met behoud van alles wat erin stond.
+  const { rootfsIsUnshifted, healUnshiftedDevcontainer } = await import('./sysbox-heal');
+  if (!(await rootfsIsUnshifted(containerId))) return;
+  await healUnshiftedDevcontainer(containerId);
 }
 
 export async function cleanupContainerNetwork(containerName: string): Promise<void> {

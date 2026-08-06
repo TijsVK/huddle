@@ -84,12 +84,28 @@ JetBrains Gateway: add a Docker server on the WSL distro. Untested.
   that was stopped first always comes back fine. Measured: `wsl --terminate` does not run systemd
   shutdown, so no unit inside the distro can save you — the stop has to happen from Windows first.
   Native Linux is mostly safe here, since a normal reboot stops docker cleanly.
-- **The data is never lost, even when a container is broken this way.** The filesystem is intact;
-  only the ownership *mapping* is missing. Rescue it from the engine before recreating:
-  `wsl -d huddle-engine -- docker cp <name>:/home/vscode/.claude ./rescue/`. Do not use
-  `docker commit` for this — the commit bakes in the shifted uids and the new container shows
-  `nobody` again. The portal flags an affected container as **Recreate needed** (it probes the real
-  ownership rather than guessing from age).
+- **You should never have to deal with this.** Starting a devcontainer probes `/bin/sh`'s owner;
+  if the shift is gone, the gateway recreates the container and puts the data back before handing
+  it over (`gateway/src/sysbox-heal.ts`). Press start, get your container, with everything you
+  installed and wrote still in it.
+  How, and why the obvious routes do not work: the *image* layers are broken in the affected
+  container but correct in a fresh one, while the *writable* layer is still readable with correct
+  uids **inside** the broken container. So: fresh container from the original image, then copy the
+  writable layer across inside-to-inside so each container applies its own shift. `docker commit`
+  is the wrong tool — it bakes one container's shifted uids into the image and the next container
+  has a different subuid base, so everything lands on `nobody` again (measured). The copy takes the
+  changed paths from `docker diff`, minus anything at, under, **or above** a mount point: the
+  workspace bind, the inner daemon's `/var/lib/docker` volume and sysbox's read-only
+  `/lib/modules` are not writable-layer state, and an *ancestor* of a mount would make `tar`
+  recurse into it (143 MB of kernel modules instead of 900 KB).
+  Manual rescue, if you ever want it: `docker cp <name>:/home/vscode/.claude ./rescue/` — that
+  works too, and the files are also readable host-side under `/proc/<pid>/root/`.
+- Upstream considers surviving a reboot to be intended: on nestybox/sysbox#757, the same "mount
+  lost its `idmapped` attribute" symptom got *"this should definitely work, there must be a bug
+  somewhere"*. So the heal above is a workaround for an upstream bug, not a permanent design.
+  Sysbox's own troubleshooting guide meanwhile states that after sysbox-fs/sysbox-mgr restarts you
+  are "expected to recreate ... all the active Sysbox containers" — which is exactly why the
+  `-Down` rule above matters.
 - **WSL tears the distro down** when no client is attached, taking dockerd and the containers with
   it. `-Keepalive` holds one client open. The gateway carries `--restart unless-stopped`;
   devcontainers deliberately do not, since a restart policy would silently bring them back in the
