@@ -37,6 +37,7 @@
       </div>
     </a>
 
+    @if (showDockerAccess()) {
     <a class="kpi" routerLink="/docker-access">
       <div class="kpi__head">
         <span class="kpi__label">Docker Access</span>
@@ -47,6 +48,7 @@
       <div class="kpi__value">{{ vm.activeGrants.length }}</div>
       <div class="kpi__foot"><span class="dot dot--ok"></span><b>{{ vm.activeGrants.length }}</b> active grants</div>
     </a>
+    }
 
     <a class="kpi" routerLink="/firewall">
       <div class="kpi__head">
@@ -124,6 +126,7 @@
       }
     </div>
 
+    @if (showDockerAccess()) {
     <div class="card col-span-1">
       <div class="card__head">
         <h3 class="card__title">Docker Access Grants</h3>
@@ -148,6 +151,7 @@
         </table>
       }
     </div>
+    }
 
     <div class="card col-span-3">
       <div class="card__head"><h3 class="card__title">Activity Feed</h3></div>

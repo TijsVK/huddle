@@ -30,11 +30,29 @@
 
         <label class="empty-toggle">
           <input type="checkbox" [(ngModel)]="empty" (ngModelChange)="onEmptyToggle()" />
-          Empty (clone manually)
+          Empty (clone inside the container) — recommended
         </label>
 
         <label for="start-workspace">Workspace directory</label>
-        <input id="start-workspace" type="text" [(ngModel)]="workspace" (ngModelChange)="onWorkspaceInput()" placeholder="C:/projects/my-project" [disabled]="empty" />
+        <input id="start-workspace" type="text" [(ngModel)]="workspace" (ngModelChange)="onWorkspaceInput()" placeholder="/home/huddle/projects/my-project" [disabled]="empty" />
+
+        @if (!empty) {
+          <div class="mount-warning">
+            <strong>A host folder is a hole in the sandbox.</strong>
+            Everything running in this devcontainer — including any agent — gets full read and
+            write access to that folder on the host, and the egress firewall does not cover it.
+            Mount the project directory itself, never a parent, your home directory or a drive
+            root. An empty container that clones the repo inside keeps the sandbox intact.
+            @if (sysboxMode && workspaceOnWindowsDrive) {
+              <span class="mount-warning__extra">
+                This path is on a Windows drive. Those files show up inside the container as
+                <code>nobody</code>: <code>chown</code> and <code>chmod</code> fail, git needs the
+                exception Huddle adds for you, and it is much slower than the engine's own
+                filesystem. Prefer a path inside the engine.
+              </span>
+            }
+          </div>
+        }
 
         <label for="start-name">Container name</label>
         <input id="start-name" type="text" [(ngModel)]="containerName" (input)="nameTouched = true" placeholder="devcontainer-my-project" />

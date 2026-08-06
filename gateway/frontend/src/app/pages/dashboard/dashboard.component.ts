@@ -4,6 +4,7 @@ import { AsyncPipe, NgClass } from '@angular/common';
 import { StateService } from '../../core/services/state.service';
 import { ApiService } from '../../core/services/api.service';
 import { ModalService } from '../../core/services/modal.service';
+import { AuthService } from '../../core/services/auth.service';
 import { RelTimePipe } from '../../shared/pipes/rel-time.pipe';
 import { Container } from '../../core/models/container.model';
 import { Rule } from '../../core/models/rule.model';
@@ -22,6 +23,11 @@ export class DashboardComponent {
   state = inject(StateService);
   api = inject(ApiService);
   modal = inject(ModalService);
+  private auth = inject(AuthService);
+  // Sysbox: de devcontainer heeft een eigen, ONGEFILTERDE docker-daemon, dus
+  // per-actie grants kunnen daar niets afdwingen. Zelfde reden als waarom de
+  // sidebar het Docker-permissions-item verbergt; deze twee panelen bleven staan.
+  showDockerAccess = () => !this.auth.privateDaemon();
 
   readonly pieConfig: PieMenuConfig = {
     families: [

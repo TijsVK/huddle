@@ -3,6 +3,7 @@ import { FormsModule } from '@angular/forms';
 import { ModalService } from '../../../core/services/modal.service';
 import { ApiService } from '../../../core/services/api.service';
 import { StateService } from '../../../core/services/state.service';
+import { AuthService } from '../../../core/services/auth.service';
 import { DockerImage } from '../../../core/models/container.model';
 import { FmtBytesPipe } from '../../pipes/fmt-bytes.pipe';
 
@@ -11,12 +12,38 @@ import { FmtBytesPipe } from '../../pipes/fmt-bytes.pipe';
   standalone: true,
   imports: [FormsModule, FmtBytesPipe],
   templateUrl: './start-container-modal.component.html',
-  styles: []
+  styles: [`
+    .mount-warning {
+      margin: 8px 0 4px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: var(--warning-soft);
+      border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+      color: var(--text);
+      font-size: 12.5px;
+      line-height: 1.5;
+    }
+    .mount-warning strong { display: block; color: var(--warning); margin-bottom: 2px; }
+    .mount-warning__extra {
+      display: block;
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid color-mix(in srgb, var(--warning) 25%, transparent);
+    }
+    .mount-warning code {
+      font-family: var(--font-mono, monospace);
+      font-size: 12px;
+      padding: 0 3px;
+      border-radius: 3px;
+      background: color-mix(in srgb, var(--warning) 18%, transparent);
+    }
+  `]
 })
 export class StartContainerModalComponent {
   modalService = inject(ModalService);
   private api = inject(ApiService);
   private state = inject(StateService);
+  private auth = inject(AuthService);
 
   images: DockerImage[] = [];
   baseImage = '';
@@ -25,7 +52,10 @@ export class StartContainerModalComponent {
   workspace = '';
   containerName = '';
   nameTouched = false;
-  empty = false;
+  // Standaard leeg: een devcontainer zonder host-map is de veilige keuze. Een
+  // bind mount is een gat in de sandbox, dus dat hoort een bewuste actie te zijn
+  // en niet de default.
+  empty = true;
   error = '';
   status = '';
   loading = false;
@@ -44,9 +74,9 @@ export class StartContainerModalComponent {
     this.selectedImage = '';
     this.ide = 'intellij';
     this.workspace = '';
-    this.containerName = '';
     this.nameTouched = false;
-    this.empty = false;
+    this.empty = true;
+    this.containerName = 'devcontainer-empty';
     this.error = '';
     this.status = '';
     this.loading = false;
@@ -68,6 +98,15 @@ export class StartContainerModalComponent {
     });
   }
 
+  /** Sysbox-modus: alleen dan kan een map van een Windows-schijf binnenin op
+   *  nobody uitkomen (drvfs kan niet ID-mapped worden). */
+  get sysboxMode(): boolean { return this.auth.privateDaemon(); }
+
+  /** C:\... of /mnt/c/... - een pad dat op een Windows-schijf staat. */
+  get workspaceOnWindowsDrive(): boolean {
+    return /^([a-z]:|\/mnt\/[a-z]\/)/i.test(this.workspace.trim());
+  }
+
   onWorkspaceInput(): void {
     if (!this.nameTouched) {
       const leaf = this.workspace.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? '';
@@ -78,9 +117,10 @@ export class StartContainerModalComponent {
   onEmptyToggle(): void {
     if (this.empty) {
       this.workspace = '';
-      if (!this.nameTouched && !this.containerName) {
-        this.containerName = 'devcontainer-empty';
-      }
+      if (!this.nameTouched) { this.containerName = 'devcontainer-empty'; }
+    } else if (!this.nameTouched) {
+      // De naam kwam van de lege-default; laat hem weer volgen uit de workspace.
+      this.containerName = '';
     }
   }
 
