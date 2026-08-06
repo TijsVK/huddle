@@ -649,6 +649,11 @@ command -v update-ca-certificates >/dev/null 2>&1 && update-ca-certificates >/de
 ${sysboxDockerdBootstrap(SYSBOX_ENABLED)}
 printf 'export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/huddle-ca.crt\\n' > /etc/profile.d/99-huddle-ca.sh
 chmod 644 /etc/profile.d/99-huddle-ca.sh
+# Ook als login-shell profile, bovenop de container-Env: sommige IDE-env-probes
+# seeden de terminal/debugger vanuit de login-shell, dus een profile-export
+# garandeert dat een IDE-gestarte 'dotnet run' hem erft.
+printf 'export ASPIRE_ALLOW_UNSECURED_TRANSPORT=true\\n' > /etc/profile.d/99-huddle-aspire.sh
+chmod 644 /etc/profile.d/99-huddle-aspire.sh
 
 ${IDE_CRED_SCRUB}
 
@@ -780,6 +785,11 @@ command -v update-ca-certificates >/dev/null 2>&1 && update-ca-certificates >/de
 ${sysboxDockerdBootstrap(SYSBOX_ENABLED)}
 printf 'export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/huddle-ca.crt\\n' > /etc/profile.d/99-huddle-ca.sh
 chmod 644 /etc/profile.d/99-huddle-ca.sh
+# Ook als login-shell profile, bovenop de container-Env: sommige IDE-env-probes
+# seeden de terminal/debugger vanuit de login-shell, dus een profile-export
+# garandeert dat een IDE-gestarte 'dotnet run' hem erft.
+printf 'export ASPIRE_ALLOW_UNSECURED_TRANSPORT=true\\n' > /etc/profile.d/99-huddle-aspire.sh
+chmod 644 /etc/profile.d/99-huddle-aspire.sh
 
 ${IDE_CRED_SCRUB}
 
@@ -965,6 +975,13 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
     'NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/huddle-ca.crt',
     'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt',
     'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt',
+    // .NET Aspire draait z'n dashboard, resource-service en OTLP-endpoint over
+    // HTTPS met het self-signed ASP.NET dev-cert. In een devcontainer is dat cert
+    // niet vertrouwd, dus faalt de gRPC naar de resource-service met
+    // UntrustedRoot ("grpc errors op het dashboard" / Blazor circuit terminated).
+    // Deze endpoints binden alleen loopback, dus plain http kost geen
+    // vertrouwelijkheid en omzeilt het dev-cert-trustprobleem.
+    'ASPIRE_ALLOW_UNSECURED_TRANSPORT=true',
     // De docker-proxy-socket zit in de gemounte directory /var/run/huddle (zie
     // Mounts). DOCKER_HOST laat docker/compose/SDK's hem daar vinden; voor tools
     // die het defaultpad hardcoden legt het config-script ook een symlink op
