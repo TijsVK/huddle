@@ -49,6 +49,18 @@ EOF
 fi`;
 }
 
+// Een workspace die van een Windows-schijf komt (/mnt/c/... via drvfs) kan niet
+// ID-mapped worden - en bind mounts chownt sysbox nooit ("For bind mounts, we use
+// ID-mapping or shiftfs, but never chown"). De bestanden staan binnenin dus op
+// nobody:nogroup. Lezen en schrijven gaat gewoon (drvfs rapporteert alles 0777),
+// maar git weigert: "detected dubious ownership in repository". Daarom die ene
+// map expliciet vertrouwen - het exacte pad, geen '*', zodat de controle voor al
+// het andere blijft staan.
+function sysboxWorkspaceGitTrust(enabled: boolean, containerWorkspace: string): string {
+  if (!enabled || !containerWorkspace) return '';
+  return `git config --system --add safe.directory "${containerWorkspace}" 2>/dev/null || true`;
+}
+
 // Start dockerd IN de devcontainer. Onder sysbox-runc kan dat zonder
 // --privileged. De daemon erft de proxy-env zodat ook zijn image-pulls door de
 // firewall gaan; de MITM-CA staat op dat moment al in de trust store, anders
@@ -769,6 +781,7 @@ usermod -aG sudo noot 2>/dev/null || usermod -aG wheel noot 2>/dev/null || true
 mkdir -p "${containerWorkspace}" 2>/dev/null || true
 chown -R vscode:vscode "${containerWorkspace}" 2>/dev/null || true
 chmod -R u+rwX "${containerWorkspace}" 2>/dev/null || true
+${sysboxWorkspaceGitTrust(SYSBOX_ENABLED, containerWorkspace)}
 
 ${seedScript}
 
@@ -878,6 +891,7 @@ usermod -aG sudo noot 2>/dev/null || usermod -aG wheel noot 2>/dev/null || true
 mkdir -p "${containerWorkspace}" 2>/dev/null || true
 chown -R vscode:vscode "${containerWorkspace}" 2>/dev/null || true
 chmod -R u+rwX "${containerWorkspace}" 2>/dev/null || true
+${sysboxWorkspaceGitTrust(SYSBOX_ENABLED, containerWorkspace)}
 
 ${seedScript}
 
@@ -1062,6 +1076,17 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
   ];
 
   const effectiveSource = empty ? '' : await ensureWorktree(toLinuxPath(workspaceDir), containerName);
+  // Een workspace op een Windows-schijf is bruikbaar maar niet ideaal: drvfs kan
+  // niet ID-mapped worden, dus binnenin is alles van nobody, chown/chmod falen en
+  // het is een stuk trager dan de ext4 van de engine. Zeg dat één keer hardop in
+  // plaats van de gebruiker het te laten ontdekken via een vage git-fout.
+  if (SYSBOX_ENABLED && /^\/mnt\/[a-z]\//i.test(effectiveSource)) {
+    console.warn(
+      `[sysbox] ${containerName}: workspace '${effectiveSource}' lives on a Windows drive; ` +
+      `its files show as nobody:nogroup inside and chown/chmod will fail. ` +
+      `Keeping the repo on the engine's own filesystem is faster and avoids this.`
+    );
+  }
 
   const folderMounts = buildFolderMounts(containerName);
 

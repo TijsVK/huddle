@@ -133,15 +133,34 @@ JetBrains Gateway: add a Docker server on the WSL distro. Untested.
   ```
 
   drvfs cannot be ID-mapped, and sysbox never chowns bind mounts ("For bind mounts, we use
-  ID-mapping or shiftfs, but never chown"). Reads and writes still work, because drvfs reports
-  everything as `0777` — but ownership is wrong, which trips git's dubious-ownership check, SSH key
-  permission checks and anything else that verifies file owners. It is also far slower than the
-  distro's ext4.
+  ID-mapping or shiftfs, but never chown"). This is specific to sysbox — the same bind under plain
+  `runc` shows `1000:1000` and `chown` works.
+
+  Measured effects: reads and writes still work (drvfs reports everything `0777`), and an SSH key
+  from the workspace was accepted. What breaks is `git`, with
+  `fatal: detected dubious ownership in repository`, plus `chown`/`chmod`
+  (`Operation not permitted`), so installers that chown into the workspace fail.
+
+  Huddle registers the workspace as a git `safe.directory` in sysbox mode — the exact path, not
+  `*`, so the check still protects every other directory — and logs a warning when a workspace
+  comes off a Windows drive. That makes it *usable*; it does not make it *good*. Keep repos on the
+  engine's own filesystem: correct ownership, working `chown`, and far faster than drvfs.
 - **Disk grows per devcontainer.** Each one has its own `/var/lib/docker` volume for its inner
   daemon, so images are pulled per devcontainer rather than shared — an Aspire project pulling
   SqlServer costs ~1.7 GB *each*. A WSL vhdx also never shrinks on its own; reclaim with
   `wsl --manage huddle-engine --set-sparse true`, and delete devcontainers you no longer need
   (Huddle removes the volume with the container).
+
+  Why not share one store: dockerd requires exclusive ownership of its data-root, so two inner
+  daemons pointed at the same directory corrupt it. The supported way to share is sysbox's *inner
+  image preloading* — bake images into the devcontainer image, where the outer overlay2 layers
+  dedupe them across every container. It requires dropping the volume ("make sure that the
+  container's `/var/lib/docker` is not backed by a host volume"), which we measured as workable
+  (inner dockerd runs fine on overlay-on-overlay) but costly: one `busybox` pull put 257 MB and
+  710 entries into the container's writable layer, and that layer is what the boot repair has to
+  walk and chown after an unclean shutdown. It would also pull inner images into every snapshot.
+  A pull-through registry cache on the engine is the cheaper win — it saves the download, not the
+  disk.
 - **Memory is shared by the whole VM.** The default is 8 GB *per devcontainer* while WSL2 gives the
   utility VM about half the host's RAM. On a 16 GB laptop one devcontainer can exhaust it; cap the
   VM in `%USERPROFILE%\.wslconfig` (`[wsl2] memory=...`) and lower the per-container default.
