@@ -113,6 +113,15 @@ export async function runInit(opts: InitOptions, images: ResolvedImages): Promis
     }
   }
 
+  // Sysbox-modus: de gateway zet elke devcontainer onder sysbox-runc met een
+  // EIGEN dockerd erin (geen socket-proxy). Alleen doorgeven; de gateway beslist.
+  let modeFlags = '';
+  if (process.env.HUDDLE_SYSBOX === '1') {
+    modeFlags += ' -e HUDDLE_SYSBOX=1';
+    if (process.env.HUDDLE_SYSBOX_RUNTIME) modeFlags += ` -e HUDDLE_SYSBOX_RUNTIME=${process.env.HUDDLE_SYSBOX_RUNTIME}`;
+    console.log(yellow('Sysbox mode active (HUDDLE_SYSBOX=1): each devcontainer runs under sysbox-runc with its own in-container dockerd.'));
+  }
+
   console.log(dim(`Starting container`));
   // The gateway is engine-agnostic (talks the Docker-compatible API on the
   // mounted socket), but does need to know it's Podman: it then sets
@@ -141,10 +150,15 @@ export async function runInit(opts: InitOptions, images: ResolvedImages): Promis
   run(
     `${rt} run -d` +
     ` --name ${CONTAINER}` +
+    // Kom terug als de docker-daemon herstart. Op Windows/macOS is de engine host
+    // een VM/WSL2-distro die afgebroken kan worden; zonder policy blijft de
+    // gateway daarna stil terwijl dockerd wel terugkomt.
+    ` --restart unless-stopped` +
     ` --network ${runtime.defaultNetwork}` +
     securityOptFlags +
     ` -e HUDDLE_RUNTIME=${runtime.name}` +
     ` -e HUDDLE_OPERATOR_TOKEN=${operatorToken}` +
+    modeFlags +
     ` -p ${HOST_PORT}:3000` +
     ` -v ${VOLUME}:/data` +
     ` -v ${runtime.socketPath}:/var/run/docker.sock` +

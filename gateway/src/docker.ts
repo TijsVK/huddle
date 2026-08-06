@@ -9,6 +9,93 @@ import { sanitizeResolvConf } from './dns-egress';
 
 const SOCKET_DIR = '/tmp/dc-sockets';
 
+// Sysbox-modus (HUDDLE_SYSBOX=1): de devcontainer draait onder de sysbox-runc
+// runtime (user-namespace + gevirtualiseerde /proc en /sys) en start zijn EIGEN
+// dockerd. Geen socket-proxy in het pad, geen sidecar: de devcontainer heeft een
+// volwaardige, ongefilterde docker die tools als Aspire, compose, Testcontainers
+// en kind gewoon kunnen gebruiken. De egress-firewall verandert niet - dc-net-*
+// blijft --internal en alle uitgaande HTTP(S) loopt door de huddle-proxy.
+export const SYSBOX_ENABLED = process.env.HUDDLE_SYSBOX === '1';
+const SYSBOX_RUNTIME = process.env.HUDDLE_SYSBOX_RUNTIME ?? 'sysbox-runc';
+
+/** Volume voor /var/lib/docker van de dockerd IN de devcontainer. Zonder dit
+ *  schrijft die daemon in de writable layer van de devcontainer: overlay-op-
+ *  overlay, en elke geneste image blaast het snapshot van de devcontainer op. */
+export function sysboxDockerDataVolume(containerName: string): string {
+  return `huddle-sysbox-docker-${containerName}`;
+}
+
+// Geneste containers hangen aan de bridge van de in-container daemon en kunnen de
+// naam `huddle` niet resolven; ze krijgen daarom het OPGELOSTE proxy-IP mee via de
+// docker-client-config. Daarnaast moeten docker0/br-* uitgezonderd worden van de
+// egress-DROP: docker-proxy forwardt een published port via die bridge, en zonder
+// uitzondering is geen enkele geneste published port vanuit de devcontainer
+// bereikbaar (Aspire project -> SqlServer, compose ports, Testcontainers).
+// Vereist dat $HUDDLE_IP al gezet is (gebeurt in beide config-scripts).
+function nestedDaemonNetworkConfig(enabled: boolean): string {
+  if (!enabled) return '';
+  return `for _brif in docker0 br+; do
+  iptables -C OUTPUT -o "$_brif" -j ACCEPT 2>/dev/null || iptables -I OUTPUT 1 -o "$_brif" -j ACCEPT 2>/dev/null || true
+  iptables -t nat -C OUTPUT -o "$_brif" -j RETURN 2>/dev/null || iptables -t nat -I OUTPUT 1 -o "$_brif" -j RETURN 2>/dev/null || true
+done
+if [ -n "$HUDDLE_IP" ]; then
+  for _h in /root /home/vscode; do
+    mkdir -p "$_h/.docker"
+    cat > "$_h/.docker/config.json" <<EOF
+{"proxies":{"default":{"httpProxy":"http://$HUDDLE_IP:80","httpsProxy":"http://$HUDDLE_IP:80","noProxy":"localhost,127.0.0.1,::1,[::1],host.docker.internal"}}}
+EOF
+  done
+  chown -R vscode:vscode /home/vscode/.docker 2>/dev/null || true
+fi`;
+}
+
+// Start dockerd IN de devcontainer. Onder sysbox-runc kan dat zonder
+// --privileged. De daemon erft de proxy-env zodat ook zijn image-pulls door de
+// firewall gaan; de MITM-CA staat op dat moment al in de trust store, anders
+// faalt elke pull met x509: unknown authority.
+function sysboxDockerdBootstrap(enabled: boolean): string {
+  if (!enabled) return '';
+  return `if ! command -v dockerd >/dev/null 2>&1; then
+  echo "[huddle] WARNING: no dockerd in this image; build it with --build-arg HUDDLE_DOCKER_ENGINE=1" >&2
+else
+  if ! docker -H unix:///var/run/docker.sock version >/dev/null 2>&1; then
+    getent group docker >/dev/null 2>&1 || groupadd -f docker
+    id -nG vscode 2>/dev/null | grep -qw docker || usermod -aG docker vscode 2>/dev/null || true
+    cat > /usr/local/bin/huddle-dockerd-supervise <<'SUP'
+#!/bin/sh
+export http_proxy="http://huddle:80" https_proxy="http://huddle:80"
+export HTTP_PROXY="http://huddle:80" HTTPS_PROXY="http://huddle:80"
+export no_proxy="localhost,127.0.0.1,::1,[::1],host.docker.internal"
+export NO_PROXY="localhost,127.0.0.1,::1,[::1],host.docker.internal"
+while :; do
+  if [ -f /var/log/huddle-dockerd.log ] && [ "$(wc -c </var/log/huddle-dockerd.log)" -gt 20000000 ]; then
+    : > /var/log/huddle-dockerd.log
+  fi
+  dockerd --group docker --host=unix:///var/run/docker.sock >>/var/log/huddle-dockerd.log 2>&1
+  echo "[huddle] dockerd exited ($?), restarting in 3s" >>/var/log/huddle-dockerd.log
+  sleep 3
+done
+SUP
+    chmod +x /usr/local/bin/huddle-dockerd-supervise
+    setsid nohup /usr/local/bin/huddle-dockerd-supervise >/dev/null 2>&1 &
+    for _i in $(seq 1 40); do
+      docker -H unix:///var/run/docker.sock version >/dev/null 2>&1 && break
+      sleep 1
+    done
+  fi
+  chmod 0660 /var/run/docker.sock 2>/dev/null || true
+  chgrp docker /var/run/docker.sock 2>/dev/null || true
+fi
+
+# VS Code's devcontainer set-up hangt de remote env aan /etc/environment als de
+# NIET-root gebruiker. Onder sysbox is dat bestand van nobody:nogroup (ID-mapped
+# image layer), waardoor de eerste attach faalt met "cannot create
+# /etc/environment: Permission denied" en pas een tweede poging slaagt.
+touch /etc/environment 2>/dev/null || true
+chown vscode:vscode /etc/environment 2>/dev/null || true
+chmod 0664 /etc/environment 2>/dev/null || true`;
+}
+
 // De CLI geeft de gedetecteerde container-engine door via HUDDLE_RUNTIME. Bij
 // (rootless) Podman is de per-container proxy-socket SELinux-gelabeld; een
 // SELinux-confined devcontainer mag hem dan niet benaderen. `label=disable` op
@@ -390,6 +477,11 @@ export async function startExistingContainer(containerId: string): Promise<void>
 }
 
 export async function cleanupContainerNetwork(containerName: string): Promise<void> {
+  // Sysbox: het /var/lib/docker-volume van de in-container dockerd. Idempotent:
+  // in klassieke modus bestaat het niet (404 wordt geslikt).
+  try {
+    await dockerRequest('DELETE', `/volumes/${encodeURIComponent(sysboxDockerDataVolume(containerName))}?force=true`);
+  } catch {}
   const netName = `dc-net-${containerName}`;
   if (!(await networkExists(netName))) return;
   try { await disconnectNetwork(netName, 'huddle'); } catch {}
@@ -426,7 +518,11 @@ done`;
 // Docker-toegang loopt via de socket in de gemounte directory /var/run/huddle
 // (zie DOCKER_HOST). Symlink het defaultpad voor tools die DOCKER_HOST negeren.
 // Gedeeld tussen het JetBrains- en het VS Code-startscript.
-const DOCKER_SOCK_SYMLINK = `# Docker-toegang loopt via de socket in de gemounte directory /var/run/huddle
+// In sysbox-modus IS /var/run/docker.sock de echte socket van de in-container
+// dockerd; een symlink naar zichzelf zou hem slopen.
+const DOCKER_SOCK_SYMLINK = SYSBOX_ENABLED
+  ? `# Sysbox: /var/run/docker.sock is de socket van de dockerd in deze container.`
+  : `# Docker-toegang loopt via de socket in de gemounte directory /var/run/huddle
 # (zie DOCKER_HOST). Symlink het defaultpad voor tools die DOCKER_HOST negeren.
 ln -sfn /var/run/huddle/docker.sock /var/run/docker.sock 2>/dev/null || true`;
 
@@ -541,12 +637,16 @@ iptables -C OUTPUT -o lo -j ACCEPT 2>/dev/null || iptables -A OUTPUT -o lo -j AC
 iptables -C OUTPUT -p tcp -d "$HUDDLE_IP" -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p tcp -d "$HUDDLE_IP" -j ACCEPT
 iptables -C OUTPUT -p tcp -j DROP 2>/dev/null || iptables -A OUTPUT -p tcp -j DROP
 
+${nestedDaemonNetworkConfig(SYSBOX_ENABLED)}
+
 # Installeer huddle's MITM-CA in de system trust store + zet env-vars voor
 # tools die niet uit de system store lezen (node).
 mkdir -p /usr/local/share/ca-certificates
 echo '${caB64}' | base64 -d > /usr/local/share/ca-certificates/huddle-ca.crt
 chmod 644 /usr/local/share/ca-certificates/huddle-ca.crt
 command -v update-ca-certificates >/dev/null 2>&1 && update-ca-certificates >/dev/null 2>&1 || true
+
+${sysboxDockerdBootstrap(SYSBOX_ENABLED)}
 printf 'export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/huddle-ca.crt\\n' > /etc/profile.d/99-huddle-ca.sh
 chmod 644 /etc/profile.d/99-huddle-ca.sh
 
@@ -668,12 +768,16 @@ iptables -C OUTPUT -o lo -j ACCEPT 2>/dev/null || iptables -A OUTPUT -o lo -j AC
 iptables -C OUTPUT -p tcp -d "$HUDDLE_IP" -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p tcp -d "$HUDDLE_IP" -j ACCEPT
 iptables -C OUTPUT -p tcp -j DROP 2>/dev/null || iptables -A OUTPUT -p tcp -j DROP
 
+${nestedDaemonNetworkConfig(SYSBOX_ENABLED)}
+
 # Installeer huddle's MITM-CA in de system trust store + zet env-vars voor
 # tools die niet uit de system store lezen (node, java).
 mkdir -p /usr/local/share/ca-certificates
 echo '${caB64}' | base64 -d > /usr/local/share/ca-certificates/huddle-ca.crt
 chmod 644 /usr/local/share/ca-certificates/huddle-ca.crt
 command -v update-ca-certificates >/dev/null 2>&1 && update-ca-certificates >/dev/null 2>&1 || true
+
+${sysboxDockerdBootstrap(SYSBOX_ENABLED)}
 printf 'export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/huddle-ca.crt\\n' > /etc/profile.d/99-huddle-ca.sh
 chmod 644 /etc/profile.d/99-huddle-ca.sh
 
@@ -827,8 +931,11 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
     console.log(`[huddle] Base image '${imageName}' built successfully`);
   }
 
-  // Create per-container Docker socket proxy (injects X-Container-Id for OPA policy)
-  await createContainerProxy(containerName, SOCKET_DIR);
+  // Create per-container Docker socket proxy (injects X-Container-Id for OPA policy).
+  // Sysbox: de devcontainer heeft een EIGEN daemon, dus geen proxy in het pad.
+  if (!SYSBOX_ENABLED) {
+    await createContainerProxy(containerName, SOCKET_DIR);
+  }
 
   // JB-specifieke env (host-config pad, JBR/RemoteDev data, java-proxy) slaan we
   // over voor VS Code; de proxy- en user-env blijven gelijk.
@@ -862,7 +969,7 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
     // Mounts). DOCKER_HOST laat docker/compose/SDK's hem daar vinden; voor tools
     // die het defaultpad hardcoden legt het config-script ook een symlink op
     // /var/run/docker.sock.
-    'DOCKER_HOST=unix:///var/run/huddle/docker.sock',
+    `DOCKER_HOST=${SYSBOX_ENABLED ? 'unix:///var/run/docker.sock' : 'unix:///var/run/huddle/docker.sock'}`,
     ...(isVscode ? [] : [
       'DEVCONTAINER_CONFIG_PATH=/.jbdevcontainer/config/JetBrains/host-config.json',
       'XDG_DATA_HOME=/.jbdevcontainer/data',
@@ -887,16 +994,23 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
       Source: effectiveSource,
       Target: containerWorkspace,
     }]),
-    {
-      // Mount de per-container socket-DIRECTORY, niet het socket-bestand zelf:
-      // een file-bind pint de inode en wijst na een huddle-herstart (unlink +
-      // nieuwe socket) voorgoed naar de dode oude socket. Via de directory ziet
-      // de container altijd de actuele socket; DOCKER_HOST (env) en de symlink
-      // /var/run/docker.sock (config-script) wijzen ernaar.
-      Type: 'bind',
-      Source: `${SOCKET_DIR}/${containerName}`,
-      Target: '/var/run/huddle',
-    },
+    ...(SYSBOX_ENABLED
+      ? [{
+          // Sysbox: eigen volume voor /var/lib/docker van de in-container dockerd.
+          Type: 'volume',
+          Source: sysboxDockerDataVolume(containerName),
+          Target: '/var/lib/docker',
+        }]
+      : [{
+          // Mount de per-container socket-DIRECTORY, niet het socket-bestand zelf:
+          // een file-bind pint de inode en wijst na een huddle-herstart (unlink +
+          // nieuwe socket) voorgoed naar de dode oude socket. Via de directory ziet
+          // de container altijd de actuele socket; DOCKER_HOST (env) en de symlink
+          // /var/run/docker.sock (config-script) wijzen ernaar.
+          Type: 'bind',
+          Source: `${SOCKET_DIR}/${containerName}`,
+          Target: '/var/run/huddle',
+        }]),
   ];
 
   const createBody = {
@@ -917,6 +1031,15 @@ export async function createAndStartContainer(params: StartParams): Promise<stri
       Mounts: mounts,
       NetworkMode: netName,
       CapAdd: ['NET_ADMIN'],
+      ...(SYSBOX_ENABLED
+        ? {
+            Runtime: SYSBOX_RUNTIME,
+            // De engine host is op Windows/macOS een VM/distro die afgebroken kan
+            // worden; zonder policy staat de devcontainer daarna stil terwijl
+            // dockerd wel terugkomt.
+            RestartPolicy: { Name: 'unless-stopped' },
+          }
+        : {}),
       ...(RUNTIME_SECURITY_OPT.length ? { SecurityOpt: RUNTIME_SECURITY_OPT } : {}),
       Memory: parseMemoryBytes(params.memory || getSetting('defaultMemory') || '8g'),
       CpuQuota: parseCpuQuota(params.cpus || getSetting('defaultCpus') || '2'),

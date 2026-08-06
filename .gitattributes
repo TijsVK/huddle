@@ -1,0 +1,8 @@
+# Shell scripts run inside Linux containers and the WSL2 engine host. With git's
+# autocrlf on Windows a CRLF checkout makes bash fail with "$'\r': command not
+# found" and "set: pipefail: invalid option name". Scoped deliberately to these
+# paths: a repo-wide rule would renormalise every file in the tree on the next
+# Windows checkout.
+scripts/*.sh text eol=lf
+gateway/test/sysbox/*.sh text eol=lf
+gateway/test/sysbox/Dockerfile* text eol=lf

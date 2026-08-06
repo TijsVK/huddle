@@ -3,8 +3,16 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 $HUDDLE_CONTAINER = "huddle"
-$HUDDLE_IMAGE     = "huddle"
-$HUDDLE_PORT      = 3000
+$HUDDLE_IMAGE     = if ($env:HUDDLE_IMAGE) { $env:HUDDLE_IMAGE } else { "huddle" }
+$HUDDLE_PORT      = if ($env:HUDDLE_PORT) { [int]$env:HUDDLE_PORT } else { 3000 }
+
+# Sysbox-modus: elke devcontainer draait onder sysbox-runc met een EIGEN dockerd
+# erin - geen socket-proxy, geen per-actie docker-rechten. Sysbox hoort op de
+# docker-HOST, en dat kan op Windows niet de Docker Desktop-VM zijn, dus Huddle
+# krijgt een eigen WSL2-distro als engine host (zie huddle-engine.ps1).
+$SYSBOX_MODE = ($env:HUDDLE_SYSBOX -eq '1')
+$engineHelper = Join-Path $PSScriptRoot 'huddle-engine.ps1'
+if (Test-Path $engineHelper) { . $engineHelper }
 
 # Per-IDE base images. Elke IDE heeft een eigen base-devimage-<ide>/ folder met
 # een Dockerfile en draagt LABEL com.devcontainer.ide=<ide>. Snapshots inheriten
@@ -90,6 +98,23 @@ function Write-Banner {
 }
 
 function Write-Status {
+    # In sysbox-modus draait de gateway op de ENGINE HOST (WSL2-distro), niet op de
+    # lokale docker; die vragen zou altijd "gestopt" opleveren.
+    if ($SYSBOX_MODE -and (Get-Command Invoke-Engine -ErrorAction SilentlyContinue)) {
+        $rc = Invoke-Engine -Quiet -Command "docker ps --filter name=^${HUDDLE_CONTAINER}`$ --format '{{.Names}}' | grep -q ."
+        if ($rc -eq 0) {
+            Write-Host "  [ON]  Huddle draait op de engine  -->  http://localhost:${HUDDLE_PORT}" -ForegroundColor Green
+            if ((Get-Command Test-EngineKeepalive -ErrorAction SilentlyContinue) -and -not (Test-EngineKeepalive)) {
+                Write-Host "  [!]   geen keepalive: WSL sloopt de distro tussen commando's door" -ForegroundColor Yellow
+                Write-Host "        herstel met: .\huddle-engine.ps1 -Keepalive" -ForegroundColor DarkGray
+            }
+        } else {
+            Write-Host "  [OFF] Huddle is gestopt (engine '$(if ($env:HUDDLE_ENGINE_DISTRO) { $env:HUDDLE_ENGINE_DISTRO } else { 'huddle-engine' })')" -ForegroundColor Red
+        }
+        Write-Host ""
+        return
+    }
+
     $running = & $RUNTIME ps --filter "name=^${HUDDLE_CONTAINER}$" --format "{{.Names}}"
     if ($running) {
         Write-Host "  [ON]  Huddle draait  -->  http://localhost:${HUDDLE_PORT}" -ForegroundColor Green
@@ -108,6 +133,9 @@ function Show-Menu {
     Write-Host "   3  Base image bouwen per IDE (of alle parallel)" -ForegroundColor White
     Write-Host "   4  Huddle bouwen en herinitialiseren (CLI, no-pull)" -ForegroundColor White
     Write-Host "   5  Tests draaien (unit + e2e)" -ForegroundColor White
+    Write-Host "   6  Sysbox engine host opzetten/controleren (WSL2)" -ForegroundColor White
+    Write-Host "  -----------------------------------------" -ForegroundColor DarkGray
+    Write-Host "   r  Status verversen (Enter doet hetzelfde)" -ForegroundColor White
     Write-Host "  -----------------------------------------" -ForegroundColor DarkGray
     Write-Host "   0  Afsluiten" -ForegroundColor DarkGray
     Write-Host ""
@@ -168,6 +196,18 @@ function Install-HuddleCli {
 # `huddle init`; dit script levert alleen de lokaal gebouwde image aan via
 # HUDDLE_IMAGE + HUDDLE_NO_PULL zodat er niets uit het register gepulld wordt.
 function Initialize-Huddle {
+    # Sysbox: image-build, CLI en gateway draaien OP de engine host, niet op de
+    # lokale docker. De portal blijft op http://localhost:<port> bereikbaar via
+    # WSL-portforwarding.
+    if ($SYSBOX_MODE) {
+        if (-not (Get-Command Start-HuddleOnEngine -ErrorAction SilentlyContinue)) {
+            Write-Host "  [FAIL] huddle-engine.ps1 niet gevonden naast huddle.ps1." -ForegroundColor Red
+            return $false
+        }
+        Write-Host "  Sysbox-modus: initialiseren op de engine host..." -ForegroundColor DarkCyan
+        return (Start-HuddleOnEngine -RepoRoot $PSScriptRoot -Port $HUDDLE_PORT -Image $HUDDLE_IMAGE)
+    }
+
     if (-not (Get-Command huddle -ErrorAction SilentlyContinue)) {
         Write-Host "  [FAIL] 'huddle' CLI niet gevonden. Kies de reset-optie 'CLI' om hem te installeren." -ForegroundColor Red
         return $false
@@ -181,6 +221,9 @@ function Initialize-Huddle {
     }
 
     Write-Host "  Initialiseren via 'huddle init' (runtime '${RUNTIME}', HUDDLE_NO_PULL=1, image '${HUDDLE_IMAGE}')..." -ForegroundColor DarkCyan
+    $prevImage  = $env:HUDDLE_IMAGE
+    $prevNoPull = $env:HUDDLE_NO_PULL
+    $prevPort   = $env:HUDDLE_PORT
     $env:HUDDLE_IMAGE   = $HUDDLE_IMAGE
     $env:HUDDLE_NO_PULL = '1'
     $env:HUDDLE_PORT    = "$HUDDLE_PORT"
@@ -192,8 +235,40 @@ function Initialize-Huddle {
         }
         return $true
     } finally {
-        Remove-Item Env:HUDDLE_IMAGE, Env:HUDDLE_NO_PULL, Env:HUDDLE_PORT -ErrorAction SilentlyContinue
+        # Alleen opruimen wat wij zetten; een door de gebruiker gezette
+        # HUDDLE_PORT/HUDDLE_IMAGE moet een init overleven.
+        if ($null -ne $prevImage)  { $env:HUDDLE_IMAGE = $prevImage }   else { Remove-Item Env:HUDDLE_IMAGE -ErrorAction SilentlyContinue }
+        if ($null -ne $prevNoPull) { $env:HUDDLE_NO_PULL = $prevNoPull } else { Remove-Item Env:HUDDLE_NO_PULL -ErrorAction SilentlyContinue }
+        if ($null -ne $prevPort)   { $env:HUDDLE_PORT = $prevPort }     else { Remove-Item Env:HUDDLE_PORT -ErrorAction SilentlyContinue }
     }
+}
+
+# -- Image bouwen op de JUISTE daemon -----------------------------------------
+# Klassiek: de lokale docker. Sysbox: de ENGINE HOST, want daar draaien de
+# devcontainers - een image op Docker Desktop zou nooit gebruikt worden. De base
+# image heeft in die modus ook een echte docker-engine nodig, niet alleen de CLI.
+function Invoke-ImageBuild {
+    param(
+        [Parameter(Mandatory)][string]$Tag,
+        [Parameter(Mandatory)][string]$Dockerfile,
+        [Parameter(Mandatory)][string]$Context,
+        [switch]$WithDockerEngine
+    )
+    if ($SYSBOX_MODE) {
+        if (-not (Get-Command Invoke-Engine -ErrorAction SilentlyContinue)) {
+            Write-Host "  [FAIL] huddle-engine.ps1 niet geladen; kan niet op de engine bouwen." -ForegroundColor Red
+            return $false
+        }
+        $df  = ConvertTo-EnginePath $Dockerfile
+        $ctx = ConvertTo-EnginePath $Context
+        $arg = if ($WithDockerEngine) { '--build-arg HUDDLE_DOCKER_ENGINE=1 ' } else { '' }
+        # BUILDKIT_PROGRESS=plain: de standaard renderer gebruikt carriage returns
+        # en ANSI, wat een onleesbare trap wordt over de wsl.exe -> PowerShell grens.
+        $rc = Invoke-Engine -Command "cd '$ctx' && BUILDKIT_PROGRESS=plain docker build ${arg}-t $Tag -f '$df' '$ctx'"
+        return ($rc -eq 0)
+    }
+    & $RUNTIME build -t $Tag -f $Dockerfile $Context --no-cache
+    return ($LASTEXITCODE -eq 0)
 }
 
 # ── Build Huddle image ────────────────────────────────────────────────────────
@@ -201,8 +276,9 @@ function Initialize-Huddle {
 function Build-HuddleImage {
     $scriptDir = $PSScriptRoot
     Write-Host "  Image '${HUDDLE_IMAGE}' bouwen..." -ForegroundColor DarkCyan
-    & $RUNTIME build -t $HUDDLE_IMAGE (Join-Path $scriptDir "gateway") --no-cache
-    if ($LASTEXITCODE -eq 0) {
+    $gwDir = Join-Path $scriptDir "gateway"
+    $built = Invoke-ImageBuild -Tag $HUDDLE_IMAGE -Dockerfile (Join-Path $gwDir 'Dockerfile') -Context $gwDir
+    if ($built) {
         Write-Host "  [OK] Image '${HUDDLE_IMAGE}' klaar." -ForegroundColor Green
     } else {
         Write-Host "  [FAIL] Build mislukt." -ForegroundColor Red
@@ -410,8 +486,8 @@ function Build-SharedBase {
     $dockerfile = Join-Path $ScriptDir 'base-devimage\Dockerfile'
     Write-Host "  Gedeelde base image 'ghcr.io/infosupport/base-devimage' bouwen..." -ForegroundColor DarkCyan
     # Build-context = repo-root zodat de Dockerfile `COPY .ai/…` kan; Dockerfile via -f.
-    & $RUNTIME build -t ghcr.io/infosupport/base-devimage -f $dockerfile $ScriptDir --no-cache
-    if ($LASTEXITCODE -ne 0) {
+    $built = Invoke-ImageBuild -Tag 'ghcr.io/infosupport/base-devimage' -Dockerfile $dockerfile -Context $ScriptDir -WithDockerEngine:$SYSBOX_MODE
+    if (-not $built) {
         Write-Host "  [FAIL] Build van base-devimage mislukt." -ForegroundColor Red
         return $false
     }
@@ -443,8 +519,8 @@ function Build-BaseImage {
     }
     Write-Host "  Image '$($ide.Image)' bouwen ($($ide.Display))..." -ForegroundColor DarkCyan
     # Build-context = repo-root zodat de Dockerfile `COPY .ai/…` kan; Dockerfile via -f.
-    & $RUNTIME build -t $ide.Image -f (Join-Path $buildPath 'Dockerfile') $scriptDir --no-cache
-    if ($LASTEXITCODE -eq 0) {
+    $built = Invoke-ImageBuild -Tag $ide.Image -Dockerfile (Join-Path $buildPath 'Dockerfile') -Context $scriptDir
+    if ($built) {
         Write-Host "  [OK] Image '$($ide.Image)' klaar." -ForegroundColor Green
     } else {
         Write-Host "  [FAIL] Build mislukt." -ForegroundColor Red
@@ -581,7 +657,27 @@ while ($running) {
         '3' { Build-BaseImage;    Read-Host "`n  Druk Enter om terug te gaan" }
         '4' { Build-HuddleImage; if ($LASTEXITCODE -eq 0) { Initialize-Huddle | Out-Null }; Read-Host "`n  Druk Enter om terug te gaan" }
         '5' { Invoke-Tests;       Read-Host "`n  Druk Enter om terug te gaan" }
+        '6' {
+            if (Get-Command Initialize-HuddleEngine -ErrorAction SilentlyContinue) {
+                if (Initialize-HuddleEngine -RepoRoot $PSScriptRoot) {
+                    $SYSBOX_MODE = $true
+                    $env:HUDDLE_SYSBOX = '1'
+                    Write-Host "`n  Engine host klaar. Kies 4 om Huddle in sysbox-modus te (her)initialiseren." -ForegroundColor Green
+                }
+            } else {
+                Write-Host "  huddle-engine.ps1 niet gevonden naast huddle.ps1." -ForegroundColor Red
+            }
+            Read-Host "`n  Druk Enter om terug te gaan"
+        }
         '0' { $running = $false }
+        { $_ -in @('r', 'R', '') } {
+            # Alleen verversen: de lus tekent het menu (incl. Write-Status) opnieuw.
+            if ($SYSBOX_MODE -and (Get-Command Invoke-Engine -ErrorAction SilentlyContinue)) {
+                Write-Host "  Containers op de engine:" -ForegroundColor DarkCyan
+                Invoke-Engine -Command 'docker ps -a --format "  {{.Names}}  |  {{.Status}}"' | Out-Null
+                Write-Host ""
+            }
+        }
         default { Write-Host "  Ongeldige keuze." -ForegroundColor Red; Start-Sleep -Seconds 1 }
     }
 }

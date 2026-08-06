@@ -25,6 +25,7 @@ import {
   execContainerOutput,
   type StartParams,
   type IdeName,
+  SYSBOX_ENABLED,
 } from './docker';
 import {
   getOperatorToken,
@@ -121,7 +122,14 @@ export async function createApiServer(): Promise<FastifyInstance> {
   });
 
   app.get('/api/auth/status', async (req) => {
-    return { authenticated: isAuthenticated(req.headers) };
+    // 'mode' laat de UI zich aanpassen aan de isolatie-modus. In sysbox-modus is
+    // de docker-daemon van een devcontainer prive en ONGEFILTERD: de per-actie
+    // docker-rechten zijn dan zinloos, dus die UI wordt verborgen i.p.v. toggles
+    // te tonen die niets kunnen afdwingen.
+    return {
+      authenticated: isAuthenticated(req.headers),
+      mode: SYSBOX_ENABLED ? 'sysbox' : 'classic',
+    };
   });
 
   // ── WebSocket push ────────────────────────────────────────────────────────

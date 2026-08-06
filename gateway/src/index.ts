@@ -1,7 +1,7 @@
 import { initDb } from './db';
 import { createProxyServer } from './proxy';
 import { createApiServer } from './api';
-import { listDevcontainers, networkExists, connectNetwork, refreshContainerIptables } from './docker';
+import { listDevcontainers, networkExists, connectNetwork, refreshContainerIptables, SYSBOX_ENABLED} from './docker';
 import { createContainerProxy } from './socket-proxy';
 import { initCa } from './tls-ca';
 import { sanitizeResolvConf, scheduleSettlingSanitize } from './dns-egress';
@@ -27,6 +27,10 @@ createApiServer().catch(err => {
 
 // Re-create proxy sockets for all existing devcontainers (survives huddle restart)
 async function initContainerProxies(): Promise<void> {
+  // Sysbox: dockerd draait IN de devcontainer, er is geen socket-proxy om te
+  // herstellen. Zonder deze guard maakt de gateway bij elke start alsnog proxy-
+  // sockets aan die niemand gebruikt.
+  if (SYSBOX_ENABLED) return;
   try {
     const containers = await listDevcontainers();
     for (const c of containers) {
