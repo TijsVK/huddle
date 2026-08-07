@@ -24,6 +24,7 @@ param(
     [switch]$Up,
     [switch]$Down,
     [switch]$Keepalive,
+    [switch]$VerboseBuild,
     [switch]$VsCode,
     [switch]$Apply,
     [switch]$IsolatePath
@@ -85,6 +86,16 @@ function Invoke-Engine {
         & wsl.exe -d $ENGINE_DISTRO @userArgs --cd / -- bash -lc $wrapped | Out-Host
     }
     return $LASTEXITCODE
+}
+
+# Zelfde aanroep als Invoke-Engine, maar geeft de STDOUT terug in plaats van hem
+# naar de host te schrijven. Bewust geen 2>&1: stderr samenvoegen maakt van elke
+# voortgangsregel een ErrorRecord.
+function Get-EngineOutput {
+    param([Parameter(Mandatory)][string]$Command)
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Command))
+    $out = & wsl.exe -d $ENGINE_DISTRO -u root --cd / -- bash -lc "echo $b64 | base64 -d | bash" 2>$null
+    return (($out -join "`n") -replace "`0", '').Trim()
 }
 
 # Windows path -> path inside the distro (C:\src\x -> /mnt/c/src/x).
@@ -302,24 +313,56 @@ function Start-HuddleOnEngine {
         [string]$RepoRoot = $PSScriptRoot,
         [int]$Port = $(if ($env:HUDDLE_PORT) { [int]$env:HUDDLE_PORT } else { 3000 }),
         [string]$Image = 'huddle',
-        [switch]$SkipBuild
+        [switch]$SkipBuild,
+        [switch]$VerboseBuild
     )
     if (-not (Test-EngineReady)) { return $false }
     Start-EngineKeepalive | Out-Null
     $repo = ConvertTo-EnginePath $RepoRoot
 
     if (-not $SkipBuild) {
-        Write-Step "building the gateway image inside the engine"
-        if ((Invoke-Engine -Command "cd '$repo' && BUILDKIT_PROGRESS=plain docker build -t $Image ./gateway") -ne 0) {
-            Write-Bad "gateway image build failed"; return $false
-        }
-        Write-Ok "gateway image '$Image' built"
+        # Deze twee builds horen bij het OPSTARTEN, niet bij een expliciete
+        # bouw-actie van de gebruiker. Meestal is er niets veranderd en zijn ze in
+        # seconden klaar, dus standaard geen buildkit-uitvoer: één regel die zegt
+        # wat er gebeurt, en pas bij een fout de log. Volledige uitvoer met
+        # -VerboseBuild of HUDDLE_VERBOSE=1.
+        $verbose = $VerboseBuild -or ($env:HUDDLE_VERBOSE -eq '1')
+        $log = '/tmp/huddle-engine-build.log'
 
-        Write-Step "building the CLI inside the engine"
-        if ((Invoke-Engine -Command "cd '$repo/cli' && npm install --no-audit --no-fund && npx tsc") -ne 0) {
-            Write-Bad "CLI build failed"; return $false
+        Write-Step "ensuring the gateway image is built in the engine"
+        # Image-id vóór en ná: zo kunnen we "al up-to-date" van "opnieuw gebouwd"
+        # onderscheiden in plaats van beide "built" te noemen.
+        $before = Get-EngineOutput "docker image inspect -f '{{.Id}}' $Image 2>/dev/null || true"
+        $buildCmd = "cd '$repo' && BUILDKIT_PROGRESS=plain docker build -t $Image ./gateway"
+        $rc = if ($verbose) { Invoke-Engine -Command $buildCmd }
+              else { Invoke-Engine -Quiet -Command "$buildCmd > $log 2>&1" }
+        if ($rc -ne 0) {
+            Write-Bad "gateway image build failed"
+            if (-not $verbose) {
+                Write-Host "  last lines of the build log:" -ForegroundColor Yellow
+                Invoke-Engine -Command "tail -30 $log" | Out-Null
+                Write-Host "  full output: re-run with -VerboseBuild (or set HUDDLE_VERBOSE=1)" -ForegroundColor DarkGray
+            }
+            return $false
         }
-        Write-Ok "CLI built"
+        $after = Get-EngineOutput "docker image inspect -f '{{.Id}}' $Image 2>/dev/null || true"
+        if ($before -and $before -eq $after) { Write-Ok "gateway image '$Image' already up to date" }
+        else { Write-Ok "gateway image '$Image' built" }
+
+        Write-Step "ensuring the CLI is built in the engine"
+        $cliCmd = "cd '$repo/cli' && npm install --no-audit --no-fund && npx tsc"
+        $rc = if ($verbose) { Invoke-Engine -Command $cliCmd }
+              else { Invoke-Engine -Quiet -Command "$cliCmd > $log 2>&1" }
+        if ($rc -ne 0) {
+            Write-Bad "CLI build failed"
+            if (-not $verbose) {
+                Write-Host "  last lines of the build log:" -ForegroundColor Yellow
+                Invoke-Engine -Command "tail -30 $log" | Out-Null
+                Write-Host "  full output: re-run with -VerboseBuild (or set HUDDLE_VERBOSE=1)" -ForegroundColor DarkGray
+            }
+            return $false
+        }
+        Write-Ok "CLI ready"
     }
 
     # Stop the previous gateway FIRST. `huddle init` removes it anyway, but the

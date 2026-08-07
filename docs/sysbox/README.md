@@ -41,9 +41,15 @@ $env:HUDDLE_SYSBOX = '1'
 #  3  build base images                 (on the engine, with the docker engine baked in)
 #  4  build gateway + huddle init       (on the engine)
 #  2  start a devcontainer
+#  7  stop the engine cleanly           (before rebooting Windows)
 ```
 
 The portal stays on `http://localhost:<HUDDLE_PORT>` through WSL's port forwarding.
+
+Startup checks that the gateway image and the CLI are built on the engine. That is normally a
+no-op and reports `already up to date`; when something did change it says `built`. The build
+output itself is kept out of the way — on a failure the last 30 lines of the log are printed, and
+`-VerboseBuild` (or `HUDDLE_VERBOSE=1`) streams the whole thing.
 
 ```
 Windows
@@ -55,8 +61,8 @@ Windows
 ```
 
 `huddle-engine.ps1` standalone actions: `-Setup`, `-Check`, `-Up` (bring the stack back after a
-restart), `-Keepalive`, `-Diagnose` (one paste with everything), `-VsCode [-Apply]`, `-Attach`,
-`-IsolatePath`, `-Shell`.
+restart), `-Down` (stop devcontainers, then the distro), `-Keepalive`, `-Diagnose` (one paste with
+everything), `-VsCode [-Apply]`, `-Attach`, `-IsolatePath`, `-Shell`, `-VerboseBuild`.
 
 ### Attaching an IDE
 

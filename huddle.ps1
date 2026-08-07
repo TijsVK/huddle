@@ -224,7 +224,11 @@ function Initialize-Huddle {
             return $false
         }
         Write-Host "  Sysbox-modus: initialiseren op de engine host..." -ForegroundColor DarkCyan
-        return (Start-HuddleOnEngine -RepoRoot $PSScriptRoot -Port $HUDDLE_PORT -Image $HUDDLE_IMAGE)
+        # Is de image net expliciet gebouwd (menu 4 / reset), dan hoeft de
+        # opstartflow hem niet nóg eens te bouwen.
+        $skip = [bool]$script:ImageJustBuilt
+        $script:ImageJustBuilt = $false
+        return (Start-HuddleOnEngine -RepoRoot $PSScriptRoot -Port $HUDDLE_PORT -Image $HUDDLE_IMAGE -SkipBuild:$skip)
     }
 
     if (-not (Get-Command huddle -ErrorAction SilentlyContinue)) {
@@ -298,6 +302,7 @@ function Build-HuddleImage {
     $gwDir = Join-Path $scriptDir "gateway"
     $built = Invoke-ImageBuild -Tag $HUDDLE_IMAGE -Dockerfile (Join-Path $gwDir 'Dockerfile') -Context $gwDir
     if ($built) {
+        $script:ImageJustBuilt = $true
         Write-Host "  [OK] Image '${HUDDLE_IMAGE}' klaar." -ForegroundColor Green
     } else {
         Write-Host "  [FAIL] Build mislukt." -ForegroundColor Red
