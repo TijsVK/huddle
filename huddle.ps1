@@ -89,12 +89,45 @@ function Write-Banner {
     Write-Host ""
 }
 
+# Operator-token voor de control-plane-auth. Zelfde volgorde als de CLI
+# (cli/src/config.ts): env HUDDLE_OPERATOR_TOKEN wint, anders het token dat
+# `huddle init` in ~/.huddle/config.json heeft bewaard. $null als er geen is.
+function Get-OperatorToken {
+    $fromEnv = $env:HUDDLE_OPERATOR_TOKEN
+    if ($fromEnv -and $fromEnv.Trim()) { return $fromEnv.Trim() }
+
+    $userHome = [Environment]::GetFolderPath('UserProfile')
+    if (-not $userHome) { $userHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME } }
+    if (-not $userHome) { return $null }
+
+    $configPath = Join-Path $userHome '.huddle/config.json'
+    if (-not (Test-Path $configPath)) { return $null }
+    try {
+        $token = (Get-Content $configPath -Raw | ConvertFrom-Json).operatorToken
+        if ($token -and $token.Trim()) { return $token.Trim() }
+    } catch {}
+    return $null
+}
+
 function Write-Status {
     $running = & $RUNTIME ps --filter "name=^${HUDDLE_CONTAINER}$" --format "{{.Names}}"
-    if ($running) {
-        Write-Host "  [ON]  Huddle draait  -->  http://localhost:${HUDDLE_PORT}" -ForegroundColor Green
-    } else {
+    if (-not $running) {
         Write-Host "  [OFF] Huddle is gestopt" -ForegroundColor Red
+        Write-Host ""
+        return
+    }
+
+    $token = Get-OperatorToken
+    if ($token) {
+        # Auto-login-link, identiek aan de output van `huddle init`: de frontend
+        # leest ?token=..., logt in en haalt het token daarna uit de adresbalk.
+        $link = "http://localhost:${HUDDLE_PORT}/?token=$([uri]::EscapeDataString($token))"
+        Write-Host "  [ON]  Huddle draait  -->  $link" -ForegroundColor Green
+        Write-Host "        Deze link logt je direct in als operator." -ForegroundColor DarkGray
+    } else {
+        Write-Host "  [ON]  Huddle draait  -->  http://localhost:${HUDDLE_PORT}" -ForegroundColor Green
+        Write-Host "        Geen operator-token gevonden (HUDDLE_OPERATOR_TOKEN of ~/.huddle/config.json)." -ForegroundColor Yellow
+        Write-Host "        Log in met het token uit de huddle-containerlogs of run 'huddle init' opnieuw." -ForegroundColor Yellow
     }
     Write-Host ""
 }
