@@ -115,13 +115,63 @@ function Write-Banner {
     Write-Host ""
 }
 
+# Operator-token voor de control-plane-auth. Zelfde volgorde als de CLI
+# (cli/src/config.ts): env HUDDLE_OPERATOR_TOKEN wint, anders het token dat
+# `huddle init` in ~/.huddle/config.json heeft bewaard. $null als er geen is.
+function Get-OperatorToken {
+    $fromEnv = $env:HUDDLE_OPERATOR_TOKEN
+    if ($fromEnv -and $fromEnv.Trim()) { return $fromEnv.Trim() }
+
+    # Sysbox: `huddle init` draait als root OP de engine host, dus daar staat de
+    # config -- de Windows-kant heeft geen (of een verouderd, klassiek) token.
+    # Geen fallback naar de host dus: een token van de verkeerde installatie in
+    # de link zetten geeft een login die stil faalt.
+    if ($SYSBOX_MODE) {
+        if (-not (Get-Command Get-EngineOutput -ErrorAction SilentlyContinue)) { return $null }
+        $json = Get-EngineOutput 'cat ~/.huddle/config.json 2>/dev/null || true'
+    } else {
+        $userHome = [Environment]::GetFolderPath('UserProfile')
+        if (-not $userHome) { $userHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME } }
+        if (-not $userHome) { return $null }
+        $configPath = Join-Path $userHome '.huddle/config.json'
+        if (-not (Test-Path $configPath)) { return $null }
+        $json = Get-Content $configPath -Raw
+    }
+
+    if (-not $json) { return $null }
+    try {
+        $token = (ConvertFrom-Json $json).operatorToken
+        if ($token -and $token.Trim()) { return $token.Trim() }
+    } catch {}
+    return $null
+}
+
+# De [ON]-regel: de portal-URL mét operator-token, zodat de link je direct
+# inlogt (identiek aan wat `huddle init` print -- de frontend leest ?token=...,
+# logt in en haalt het token daarna uit de adresbalk).
+function Write-PortalLink {
+    param([Parameter(Mandatory)][string]$Label)
+    $token = Get-OperatorToken
+    if ($token) {
+        $link = "http://localhost:${HUDDLE_PORT}/?token=$([uri]::EscapeDataString($token))"
+        Write-Host "  [ON]  $Label  -->  $link" -ForegroundColor Green
+        Write-Host "        Deze link logt je direct in als operator." -ForegroundColor DarkGray
+        return
+    }
+    Write-Host "  [ON]  $Label  -->  http://localhost:${HUDDLE_PORT}" -ForegroundColor Green
+    $where = if ($SYSBOX_MODE) { "HUDDLE_OPERATOR_TOKEN of ~/.huddle/config.json OP de engine" }
+             else { "HUDDLE_OPERATOR_TOKEN of ~/.huddle/config.json" }
+    Write-Host "        Geen operator-token gevonden ($where)." -ForegroundColor Yellow
+    Write-Host "        Log in met het token uit de huddle-containerlogs of initialiseer opnieuw." -ForegroundColor Yellow
+}
+
 function Write-Status {
     # In sysbox-modus draait de gateway op de ENGINE HOST (WSL2-distro), niet op de
     # lokale docker; die vragen zou altijd "gestopt" opleveren.
     if ($SYSBOX_MODE -and (Get-Command Invoke-Engine -ErrorAction SilentlyContinue)) {
         $rc = Invoke-Engine -Quiet -Command "docker ps --filter name=^${HUDDLE_CONTAINER}`$ --format '{{.Names}}' | grep -q ."
         if ($rc -eq 0) {
-            Write-Host "  [ON]  Huddle draait op de engine  -->  http://localhost:${HUDDLE_PORT}" -ForegroundColor Green
+            Write-PortalLink -Label 'Huddle draait op de engine'
             if ((Get-Command Test-EngineKeepalive -ErrorAction SilentlyContinue) -and -not (Test-EngineKeepalive)) {
                 Write-Host "  [!]   geen keepalive: WSL sloopt de distro tussen commando's door" -ForegroundColor Yellow
                 Write-Host "        herstel met: .\huddle-engine.ps1 -Keepalive" -ForegroundColor DarkGray
@@ -135,7 +185,7 @@ function Write-Status {
 
     $running = & $RUNTIME ps --filter "name=^${HUDDLE_CONTAINER}$" --format "{{.Names}}"
     if ($running) {
-        Write-Host "  [ON]  Huddle draait  -->  http://localhost:${HUDDLE_PORT}" -ForegroundColor Green
+        Write-PortalLink -Label 'Huddle draait'
     } else {
         Write-Host "  [OFF] Huddle is gestopt" -ForegroundColor Red
     }
