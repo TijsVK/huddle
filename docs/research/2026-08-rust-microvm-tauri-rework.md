@@ -2,6 +2,8 @@
 
 Date: 2026-08-18
 Status: feasibility investigation — no code written, no decision taken
+Baseline: `origin/main` @ `e16b4d6` (all line counts and file names below are main's, not the
+`experiment/dind*` branches)
 Related (both on branch `worktree-research-isolation-backing-layer`):
 `docs/research/2026-08-isolation-backing-layer.md`, `docs/research/2026-08-S2-sysbox-spike-results.md`
 
@@ -40,7 +42,7 @@ The single most valuable finding: **microsandbox already implements, host-side a
 the majority of what `gateway/src` hand-rolls** — deny-by-default egress policy over
 domains/CIDRs/ports, DNS control, TLS interception with guest trust-store injection, host-side
 secret injection, port publishing, bind mounts, snapshots, nested Docker, and SSH without an sshd
-in the guest. The rework is therefore less "port 7 000 lines of TypeScript to Rust" and more
+in the guest. The rework is therefore less "port main's 6 981 lines of TypeScript to Rust" and more
 "delete about half of it, and keep the policy/approval/audit/portal plane that is actually
 Huddle's product."
 
@@ -88,7 +90,7 @@ the repo (7 586 stars, Apache-2.0, Rust, last push 2026-08-18, v0.6.9 released 2
 
 | Capability | Detail | Huddle equivalent today |
 |---|---|---|
-| Boundary | microVM per sandbox via **libkrun**: KVM on Linux, Hypervisor.framework on Apple Silicon, **WHP on Windows** (preview) | Linux namespaces + `--privileged` DinD sidecar / socket-proxy |
+| Boundary | microVM per sandbox via **libkrun**: KVM on Linux, Hypervisor.framework on Apple Silicon, **WHP on Windows** (preview) | Linux namespaces + a per-container filtered Docker socket (`socket-proxy.ts`) |
 | Images | pulls **standard OCI images** from any registry; boots them directly as the VM rootfs | `ghcr.io/infosupport/base-devimage-*` — already OCI, already published |
 | Egress policy | host-enforced: `default_egress: allow\|deny` + ordered first-match rules over `public`/`private`/`host` groups, IPs, CIDRs, **domains**, port ranges. Private/loopback/link-local/cloud-metadata denied by default | `proxy.ts` + `rules.ts` + in-container iptables |
 | DNS | pinned nameservers, domain blocking, rebinding protection | `dns-egress.ts` |
@@ -97,7 +99,7 @@ the repo (7 586 stars, Apache-2.0, Rust, last push 2026-08-18, v0.6.9 released 2
 | Ports | `-p 8080:80`, binds `127.0.0.1` by default | `docker run -p` + published-port DNAT gymnastics |
 | Host reach | `host.microsandbox.internal`, denied unless the `host` group is allowed | `dc-net-*` + gateway IP |
 | Files | **bind mounts of host dirs over virtiofs** with `ro,noexec,nosuid,nodev,host-perms=private\|mirror`; named volumes (virtiofs or ext4/virtio-blk); disk images; tmpfs | docker volumes/binds |
-| Nested Docker | documented: `docker:dind` in a sandbox, with `--root-disk flat:10G` or a disk-backed volume for `/var/lib/docker`; host daemon untouched | the entire `dind*.ts` + authz-plugin experiment |
+| Nested Docker | documented: `docker:dind` in a sandbox, with `--root-disk flat:10G` or a disk-backed volume for `/var/lib/docker`; host daemon untouched | on main: not supported — demanding tools break against the socket-proxy policy; the `experiment/dind` branch tried to fix that with a `--privileged` sidecar plus an authz plugin |
 | SSH | SSH spoken **host-side**, no sshd in the guest: native sessions, a `127.0.0.1:2222` TCP listener, or `--stdio` for `ProxyCommand`; shells, exec, SFTP, `-L`/`-D` forwarding | `terminal.ts` + `pty-manager.ts` via docker exec |
 | Snapshots | writable layer captured to a portable artefact; **sandbox must be stopped** | `docker commit` on a running container |
 | Lifecycle | detached/long-running, `modify()` with a change plan labelling each field `live` / `next start` / `requires restart` / `unsupported`, idle timers, ping/touch | docker start/stop |
@@ -153,7 +155,7 @@ Set each sandbox to `default_egress: deny` with exactly two allowances: DNS, and
   proxy, enforced host-side, so guest root cannot bypass it — this is the "no route but the proxy"
   chokepoint the earlier research ranked strongest, now with a hardware boundary under it;
 - `localhost` semantics become trivial again inside a VM, which deletes the shared-netns
-  contortions on `experiment/dind` (and the nested-published-port DNAT bug they caused).
+  contortions the `experiment/dind` branch needed (and the nested-published-port DNAT bug they caused).
 
 Migrating later to microsandbox-native policy + secret injection + TLS interception is then a
 second, optional step — worth taking once live policy updates and a decision/audit stream exist
@@ -161,39 +163,51 @@ upstream (a plausible contribution: Apache-2.0 upstream, GPL-3.0 downstream, com
 
 ## 5. Codebase impact
 
-`gateway/src` is 7 135 LOC TypeScript today (tests 2 482; Angular frontend 6 993; `cli/` 1 273;
-`huddle.ps1` 587).
+**Baseline: `origin/main` @ `e16b4d6`** — not the `experiment/dind*` branches. On main,
+`gateway/src` is **6 981 LOC** TypeScript (tests 3 665; Angular frontend 7 700; `cli/src` 2 179;
+`huddle.ps1` 587). The DinD experiment's files (`dind.ts`, `dind-authz.ts`,
+`host-config-policy.ts`, `root-grant.ts`) do **not** exist on main; main's equivalent controls are
+`socket-proxy.ts`, `docker-actions.ts` and `sudo-grant.ts`.
 
-**Deleted outright** — the boundary makes them meaningless:
+**Deleted outright** — the runtime boundary makes them meaningless. This is the Sysbox takeaway
+carried over verbatim: *once the boundary is the runtime, the Docker-API policy engine is not
+needed*. That conclusion was reached for Sysbox and holds identically, and more strongly, for a
+microVM.
 
-| File | LOC | Why it dies |
+| File (main) | LOC | Why it dies |
 |---|---|---|
-| `socket-proxy.ts` | 798 | no filtered Docker window; the VM has its own daemon |
-| `dind.ts` | 469 | no sidecar, no shared netns, no CA-into-sidecar, no `nosymfollow` |
-| `host-config-policy.ts` | 235 | nothing to police — `HostConfig` never reaches a host daemon |
-| `docker-actions.ts` | 177 | plus its UI page and grant timers |
-| `dind-authz.ts` | 156 | an escape lands in the guest kernel |
-| `dns-egress.ts` | 154 | runtime-owned DNS policy |
-| `root-grant.ts` | 89 | root in your own VM is not a grant |
-| **subtotal** | **2 078** | ≈ 29 % of `gateway/src` |
+| `socket-proxy.ts` | 1 158 | no filtered Docker window, no label isolation, no per-container socket — the VM has its own daemon |
+| `docker-actions.ts` | 215 | the action allowlist and its time-limited grant timers, plus the portal page driving them |
+| `dns-egress.ts` | 154 | DNS policy is runtime-owned (pinned resolvers, rebinding protection) |
+| `sudo-grant.ts` | 135 | the locked `noot` admin account and its one-shot passwords: root inside your own disposable VM is not a privilege boundary (see §6.4) |
+| **subtotal** | **1 662** | ≈ 24 % of `gateway/src` |
 
-Plus: the `--privileged` sidecar, the in-container iptables call sites in `docker.ts` (demoted to
-UX/defence-in-depth), the case-insensitive-`HostConfig`-bypass finding class, and — if the
-microsandbox CA is adopted later — the nested-CA distribution problem.
+Plus, in `docker.ts`: the 20 in-container `iptables` call sites demote from boundary to
+UX/defence-in-depth.
+
+**Never needs to be built** — work that exists only on the experiment branches and is superseded
+rather than merged: `dind.ts` (469), `host-config-policy.ts` (235), `dind-authz.ts` (156),
+`root-grant.ts` (89) ≈ **949 LOC**, together with the `--privileged` sidecar, the dockerd
+authorization plugin, the bind-source allowlist, the `nosymfollow` remount, the shared-netns
+`localhost` contortions and the nested-published-port DNAT fix. The still-unpatched
+case-insensitive `HostConfig` bypass class disappears with the surface that hosts it.
 
 **Replaced** (same responsibility, different mechanism):
 
-| File | LOC | Becomes |
+| File (main) | LOC | Becomes |
 |---|---|---|
-| `docker.ts` | 1 173 | compute-plane trait + microsandbox SDK calls; the JetBrains/VS Code bootstrap scripts survive as guest-side provisioning |
+| `docker.ts` | 1 102 | compute-plane trait + microsandbox SDK calls; the JetBrains/VS Code bootstrap scripts survive as guest-side provisioning |
 | `terminal.ts` + `pty-manager.ts` | 299 | microsandbox exec/SSH streams instead of docker exec |
 | `tls-ca.ts` | 125 | `rcgen` (or microsandbox's CA) |
-| `worktree.ts`, `token-exchange.ts` | 111 | straight port |
+| **subtotal** | **1 526** | |
 
-**Ported to Rust, semantics unchanged** — this is the product: `rules.ts` (322), `api.ts` (1 044),
-`db.ts` (579), `proxy.ts` (663), `auth.ts` (149), `events.ts`, `extensions/loader.ts` (281),
-`workspace-flow/` (169). ≈ 3 200 LOC of TypeScript → Rust; a mechanical but real port, and the
-2 482 LOC of tests are the specification to port with them.
+**Ported to Rust, semantics unchanged** — this is the product: `api.ts` (1 033), `proxy.ts` (956),
+`db.ts` (562), `rules.ts` (423), `extensions/` (291), `workspace-flow/` (169), `auth.ts` (149),
+`index.ts` (92), `token-exchange.ts` (63), `worktree.ts` (48), `events.ts` (7) = **3 793 LOC**
+of TypeScript → Rust. Mechanical but real, and main's **3 665 LOC of tests** are the specification
+to port alongside them.
+
+(1 662 deleted + 1 526 replaced + 3 793 ported = 6 981, the whole of `gateway/src`.)
 
 **New work** (the honest cost):
 
@@ -267,6 +281,14 @@ developer) but it is *not* what the README currently claims. Decide explicitly:
   local additions logged and optionally reported. Needs signing, refresh and tamper-evidence
   design — not a v1.
 
+The same call has to be made about main's third security principle, **"No root user"**. Today it is
+implemented by `sudo-grant.ts`: a locked `noot` admin account that the operator unlocks with a
+fresh one-shot password for a bounded window. Inside a disposable microVM, guest root buys an
+attacker nothing the VM does not already grant — the boundary is host-side and the workspace is
+throwaway — so the mechanism stops being a boundary. Restate the principle as **"root is confined
+to the VM"** and keep, at most, a no-sudo-by-default UX to slow accidental damage. Do not keep the
+grant timers, the password issuance or the audit weight attached to them.
+
 ### 6.5 Images without a host Docker
 
 `docker.ts` currently falls back to building `base-devimage-*` locally from a mounted Dockerfile.
@@ -298,11 +320,20 @@ around the chokepoint and the workspace mount.
 
 ## 8. Reconciling with the Sysbox verdict
 
-The earlier research picked Sysbox because a microVM would have had to live inside the WSL2 distro,
-where there is no KVM (§2 re-confirms this, now with the `VMX not supported` line and the VBS
-context). Native-Windows Huddle removes that constraint, and microsandbox additionally covers macOS
-(Hypervisor.framework) and Linux (KVM) with one API — which is what the three-platform requirement
-asked for.
+**What carries over unchanged is the conclusion, not the runtime.** The Sysbox spike established
+that once the boundary is the *runtime*, Huddle no longer needs to police the Docker API at all:
+the filtered socket, the action allowlist, the label isolation and the time-limited Docker grants
+exist only because a container shares the host kernel and a host daemon. That reasoning is
+runtime-agnostic and a microVM satisfies it more strongly than Sysbox does — so main's
+`socket-proxy.ts` + `docker-actions.ts` (1 373 LOC, §5) come out under either plane, and the
+`experiment/dind` attempt to make Docker-in-Docker safe by *adding* policy (authz plugin,
+`HostConfig` allowlist) is superseded rather than merged.
+
+What changed is only *which* runtime: the earlier research picked Sysbox because a microVM would
+have had to live inside the WSL2 distro, where there is no KVM (§2 re-confirms this, now with the
+`VMX not supported` line and the VBS context). Native-Windows Huddle removes that constraint, and
+microsandbox additionally covers macOS (Hypervisor.framework) and Linux (KVM) with one API — which
+is what the three-platform requirement asked for.
 
 Proposed positioning:
 
@@ -310,8 +341,8 @@ Proposed positioning:
 - **Fallback:** the existing Docker plane, ideally with `sysbox-runc` (already installed and
   spike-verified on this box), for hosts with no hardware virtualisation — VDI, WSL2-only setups,
   CI. Label it honestly as "shared kernel" in the portal.
-- **Dropped:** the `--privileged` DinD sidecar, the dockerd authz plugin and the socket-proxy
-  filter, in both worlds.
+- **Dropped in both worlds:** the Docker-API policy engine on main, and the `--privileged` sidecar
+  plus dockerd authz plugin on the experiment branch.
 
 The Sysbox work is not wasted: it is the fallback plane, and it keeps the compute-plane trait
 honest by forcing two implementations from day one.
@@ -327,9 +358,11 @@ honest by forcing two implementations from day one.
 3. **Compute-plane trait + Rust port of the policy plane** (the bulk): rules, db, api, proxy, auth,
    events, extensions, with the existing test suite ported alongside.
 4. **Tauri shell** with the Angular SPA reused, plus packaging and signing.
-5. **Nested-Docker compatibility** (S7) using the existing `docs/dind` battery as the acceptance
-   suite.
-6. **Snapshots, worktrees, extensions, CLI parity**, then delete the DinD/socket-proxy code paths.
+5. **Nested-Docker compatibility** (S7) using the `docs/dind` battery from the experiment branch as
+   the acceptance suite — the tests are worth keeping even though the implementation is not.
+6. **Snapshots, worktrees, extensions, CLI parity**, then delete main's Docker-control plane
+   (`socket-proxy.ts`, `docker-actions.ts`, `sudo-grant.ts`, `dns-egress.ts`) and close the
+   `experiment/dind*` branches unmerged.
 7. **Optional:** move policy/secrets/TLS to microsandbox-native, upstreaming live policy updates and
    an audit stream if they are still missing.
 
